@@ -5,7 +5,10 @@ O **GRIT** apoia professores e monitores de cursos de computação e engenharia 
 - **Sem dependências externas:** apenas a biblioteca padrão do Python e o Git instalado.
 - **Dois modos de uso:** interface gráfica (Tkinter) e linha de comando.
 
+![Interface gráfica do GRIT com amostra de log](telas/Amostra_Log.jpg)
 ![Interface gráfica do GRIT com métricas e mapa de atividade semanal](telas/Amostra_Atividade.jpg)
+![Interface gráfica do GRIT com amostra de participacao](telas/Amostra_Participacao.jpg)
+
 
 ---
 
