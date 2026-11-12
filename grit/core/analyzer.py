@@ -1,0 +1,315 @@
+import logging
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+from .git_client import GitClient
+from .metrics import build_activity, compute_concentration
+from .models import AuthorStats, BranchReport, CommitInfo, CommitSummary, RepositoryReport
+from .normalizer import StudentNormalizer
+
+logger = logging.getLogger(__name__)
+
+PROGRESS_EVERY = 100
+BLAME_PROGRESS_EVERY = 25
+MAX_BLAME_FILES = 1500
+BLAME_WORKERS = 4
+ABANDONED_AFTER = timedelta(days=30)  # relativo ao commit mais recente do repositório
+CONCENTRATION_WARNING = 0.6
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".pdf", ".zip", ".gz", ".tar",
+    ".7z", ".rar", ".jar", ".war", ".class", ".exe", ".dll", ".so", ".dylib", ".bin", ".woff",
+    ".woff2", ".ttf", ".eot", ".mp3", ".mp4", ".mov", ".avi", ".pyc", ".o", ".a",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".sqlite", ".db",
+}
+
+
+class RepositoryAnalyzer:
+    CONVENTIONAL_REGEX = re.compile(
+        r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_\-\./]+\))?!?: .+"
+    )
+    SUSPICIOUS_MESSAGES = {
+        "update", "updates", "ajustes", "corrigindo bug", "fix", "fix bug",
+        "commit", "changes", "test", "teste", "wip", "subindo alteracoes", "."
+    }
+    IGNORED_PATHS = {
+        "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+        "poetry.lock", "Pipfile.lock", "composer.lock"
+    }
+
+    def __init__(
+        self,
+        target_path_or_url: str,
+        roster_path: Optional[Path] = None,
+        include_blame: bool = True,
+    ):
+        self.include_blame = include_blame
+        self.client = GitClient(target_path_or_url)
+        raw_mailmap = self.client.get_raw_mailmap()
+        if roster_path:
+            logger.info("Arquivo de turma: %s", roster_path)
+        self.normalizer = StudentNormalizer(raw_mailmap=raw_mailmap, roster_file=roster_path)
+
+    def _is_suspicious_message(self, message: str) -> bool:
+        clean = message.strip().lower()
+        return clean in self.SUSPICIOUS_MESSAGES or len(clean) <= 3
+
+    def _should_ignore_file(self, filepath: str) -> bool:
+        path_obj = Path(filepath)
+        if path_obj.name in self.IGNORED_PATHS:
+            return True
+        # Ignora dependências embutidas acidentalmente no commit
+        parts = set(path_obj.parts)
+        if parts.intersection({"node_modules", "vendor", ".venv", "venv", "__pycache__"}):
+            return True
+        return False
+
+    def _track_identity(self, author: AuthorStats, email: str, warned: Set[str]):
+        status = self.normalizer.classify_email(email)
+        if status == "ok":
+            return
+        if status == "generic":
+            author.generic_emails.add(email)
+        else:
+            author.unmapped_emails.add(email)
+        if email not in warned:
+            warned.add(email)
+            reason = "e-mail genérico" if status == "generic" else "fora do roster/.mailmap"
+            logger.warning("Identidade não confiável: %s <%s> (%s).", author.canonical_name, email, reason)
+
+    def _analyze_branches(self, default_branch: str) -> List[BranchReport]:
+        logger.info("Analisando branches (mesclagem e última atividade)...")
+        default_ref = self.client.resolve_ref(default_branch)
+        details = self.client.get_branch_details()
+        try:
+            merged = self.client.get_merged_branches(default_ref)
+        except Exception as e:
+            merged = set()
+            logger.warning("Não foi possível calcular branches mescladas em '%s' (%s).", default_ref, e)
+
+        dates = [d.date for d in details.values() if d.date is not None]
+        reference_date = max(dates) if dates else None
+        default_names = {default_branch, f"origin/{default_branch}"}
+
+        reports: List[BranchReport] = []
+        for bname, is_remote in self.client.get_branches():
+            detail = details.get(bname)
+            is_merged = bname in merged
+            if bname in default_names:
+                status = "principal"
+            elif is_merged:
+                status = "mesclada"
+            elif (
+                detail and detail.date and reference_date
+                and reference_date - detail.date > ABANDONED_AFTER
+            ):
+                status = "abandonada"
+            else:
+                status = "ativa"
+
+            reports.append(
+                BranchReport(
+                    name=bname,
+                    is_remote=is_remote,
+                    is_merged=is_merged,
+                    last_commit_hash=detail.commit_hash if detail else "",
+                    last_commit_date=detail.date if detail else None,
+                    last_author=detail.author if detail else "",
+                    status=status,
+                )
+            )
+            logger.debug("Branch %s: %s", bname, status)
+
+        counts = {s: sum(1 for r in reports if r.status == s) for s in ("principal", "mesclada", "ativa", "abandonada")}
+        logger.info(
+            "Branches: %d mescladas, %d ativas, %d abandonadas (sem commits há mais de %d dias do último commit do repositório).",
+            counts["mesclada"], counts["ativa"], counts["abandonada"], ABANDONED_AFTER.days,
+        )
+        return reports
+
+    def _compute_surviving_authorship(
+        self, authors: Dict[str, AuthorStats], default_branch: str
+    ) -> Tuple[str, int]:
+        """Conta, via git blame, quantas linhas atuais da branch padrão pertencem a cada autor."""
+        ref = self.client.resolve_ref(default_branch)
+        files = [
+            f for f in self.client.list_files(ref)
+            if not self._should_ignore_file(f) and Path(f).suffix.lower() not in BINARY_EXTENSIONS
+        ]
+        if len(files) > MAX_BLAME_FILES:
+            logger.warning(
+                "%d arquivos elegíveis; analisando apenas os primeiros %d para limitar o tempo.",
+                len(files), MAX_BLAME_FILES,
+            )
+            files = files[:MAX_BLAME_FILES]
+
+        if self.client.temp_dir:
+            logger.warning("Repositório clonado sem blobs (--filter=blob:none): o git blame pode ser lento.")
+        logger.info("Autoria sobrevivente: git blame em %d arquivos de '%s'...", len(files), ref)
+
+        totals: Dict[str, int] = {}
+        skipped = 0
+        with ThreadPoolExecutor(max_workers=BLAME_WORKERS) as pool:
+            results = pool.map(lambda path: self.client.blame_authors(ref, path), files)
+            for done, result in enumerate(results, start=1):
+                if result is None:
+                    skipped += 1
+                else:
+                    for (name, email), lines in result.items():
+                        canonical, _ = self.normalizer.get_canonical_identity(name, email)
+                        totals[canonical] = totals.get(canonical, 0) + lines
+                if done % BLAME_PROGRESS_EVERY == 0:
+                    logger.info("%d/%d arquivos analisados...", done, len(files))
+
+        total_lines = sum(totals.values())
+        for name, lines in totals.items():
+            author = authors.get(name)
+            if author is None:
+                logger.debug("Autor do blame ausente do histórico: %s (%d linhas).", name, lines)
+                continue
+            author.surviving_lines = lines
+
+        logger.info(
+            "Autoria sobrevivente concluída: %d linhas em %d arquivos (%d ignorados por erro).",
+            total_lines, len(files) - skipped, skipped,
+        )
+        return ref, total_lines
+
+    def analyze(self) -> RepositoryReport:
+        started = time.perf_counter()
+        try:
+            default_branch = self.client.get_default_branch()
+            authors: Dict[str, AuthorStats] = {}
+            total_commits = 0
+            suspicious_count = 0
+            direct_main_commits = 0
+            commit_summaries: List[CommitSummary] = []
+            warned_emails: Set[str] = set()
+            links = self.client.get_remote_links()
+            # Obtém commits acessíveis na branch default
+            default_branch_commits: Set[str] = set()
+            try:
+                out = self.client._run_git(["rev-list", default_branch])
+                default_branch_commits = set(out.splitlines())
+                logger.info("%d commits alcançáveis a partir de '%s'.", len(default_branch_commits), default_branch)
+            except Exception as e:
+                logger.warning(
+                    "Não foi possível listar commits de '%s' (%s); 'Commits na Main' ficará zerado.",
+                    default_branch, e,
+                )
+
+            logger.info("Processando commits...")
+            for commit in self.client.stream_commits():
+                total_commits += 1
+                if total_commits % PROGRESS_EVERY == 0:
+                    logger.info("%d commits processados...", total_commits)
+                canonical_name, email = self.normalizer.get_canonical_identity(
+                    commit.author_name, commit.author_email
+                )
+                logger.debug(
+                    "%s | %s <%s> -> %s | %s",
+                    commit.hash[:8], commit.author_name, commit.author_email,
+                    canonical_name, commit.message,
+                )
+
+                if canonical_name not in authors:
+                    logger.debug("Novo autor identificado: %s", canonical_name)
+                    authors[canonical_name] = AuthorStats(canonical_name=canonical_name)
+
+                author = authors[canonical_name]
+                commit_summaries.append(
+                    CommitSummary(
+                        hash=commit.hash,
+                        author=canonical_name,
+                        timestamp=commit.timestamp,
+                        message=commit.message,
+                        is_merge=commit.is_merge,
+                    )
+                )
+                author.emails.add(email)
+                self._track_identity(author, email, warned_emails)
+                author.total_commits += 1
+                author.commit_dates.append(commit.timestamp)
+
+                # Heurística de mensagem
+                if self.CONVENTIONAL_REGEX.match(commit.message):
+                    author.conventional_commits += 1
+                if self._is_suspicious_message(commit.message):
+                    suspicious_count += 1
+
+                # Commits na main
+                if commit.hash in default_branch_commits and not commit.is_merge:
+                    author.direct_main_commits += 1
+                    direct_main_commits += 1
+
+                # Métricas de arquivos e linhas (churn)
+                for file_change in commit.files:
+                    if self._should_ignore_file(file_change.filepath):
+                        continue
+                    author.additions += file_change.additions
+                    author.deletions += file_change.deletions
+                    author.files_touched.add(file_change.filepath)
+
+            branch_reports = self._analyze_branches(default_branch)
+
+            blame_ref: Optional[str] = None
+            blame_total = 0
+            if self.include_blame:
+                try:
+                    blame_ref, blame_total = self._compute_surviving_authorship(authors, default_branch)
+                except Exception:
+                    logger.exception("Falha ao calcular a autoria sobrevivente; seguindo sem ela.")
+            else:
+                logger.info("Autoria sobrevivente (git blame) desativada.")
+
+            activity = build_activity(authors)
+            concentration = compute_concentration(authors)
+            logger.info(
+                "Concentração: Gini de commits %.2f, Gini de linhas %.2f; maior participação: %s (%.0f%% dos commits).",
+                concentration.gini_commits, concentration.gini_churn,
+                concentration.top_author or "-", concentration.top_share * 100,
+            )
+            if len(authors) > 1 and concentration.top_share >= CONCENTRATION_WARNING:
+                logger.warning(
+                    "Trabalho concentrado: %s fez %.0f%% dos commits.",
+                    concentration.top_author, concentration.top_share * 100,
+                )
+            flagged = [a for a in authors.values() if a.identity_note]
+            if flagged:
+                logger.warning(
+                    "%d autor(es) com identidade não confiável: %s",
+                    len(flagged), ", ".join(a.canonical_name for a in flagged),
+                )
+
+            logger.info(
+                "Análise concluída em %.1fs: %d commits, %d autores, %d mensagens vagas, %d commits diretos na main.",
+                time.perf_counter() - started, total_commits, len(authors),
+                suspicious_count, direct_main_commits,
+            )
+            for a in sorted(authors.values(), key=lambda x: x.total_commits, reverse=True):
+                logger.info(
+                    "  %s: %d commits (+%d / -%d linhas, %d e-mail(s))",
+                    a.canonical_name, a.total_commits, a.additions, a.deletions, len(a.emails),
+                )
+
+            return RepositoryReport(
+                total_commits=total_commits,
+                authors=authors,
+                branches=branch_reports,
+                direct_main_commits_count=direct_main_commits,
+                suspicious_messages_count=suspicious_count,
+                commits=commit_summaries,
+                default_branch=default_branch,
+                links=links,
+                activity=activity,
+                concentration=concentration,
+                blame_ref=blame_ref,
+                blame_total_lines=blame_total,
+            )
+        finally:
+            self.client.cleanup()
+
+            
