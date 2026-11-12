@@ -9,14 +9,16 @@ from typing import BinaryIO, Dict, Generator, Iterator, List, NamedTuple, Option
 
 from .links import RepoLinks, parse_remote_url
 from .models import CommitInfo, FileChange
+from .progress import Progress
 
 logger = logging.getLogger(__name__)
 
 
 def _nul_tokens(stream: BinaryIO) -> Iterator[str]:
     buffer = b""
+    read = getattr(stream, "read1", stream.read)
     while True:
-        chunk = stream.read(65536)
+        chunk = read(65536)
         if not chunk:
             break
         parts = (buffer + chunk).split(b"\0")
@@ -33,8 +35,9 @@ class BranchRef(NamedTuple):
 
 
 class GitClient:
-    def __init__(self, target_path_or_url: str):
+    def __init__(self, target_path_or_url: str, progress_id: Optional[object] = None):
         self.target = target_path_or_url
+        self.progress_id = progress_id
         self.temp_dir: Optional[tempfile.TemporaryDirectory] = None
         self.repo_dir: Path = self._resolve_target(target_path_or_url)
 
@@ -50,15 +53,15 @@ class GitClient:
         dest_path = Path(self.temp_dir.name)
 
         try:
-            logger.info("Clonando repositório (git clone --filter=blob:none) em %s ...", dest_path)
-            subprocess.run(
-                ["git", "clone", "--filter=blob:none", target, str(dest_path)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            logger.info("Clone concluído.")
+            logger.info("Destino do clone temporário: %s", dest_path)
+            with Progress(logger, "Clonagem do repositório", run_id=self.progress_id):
+                subprocess.run(
+                    ["git", "clone", "--filter=blob:none", target, str(dest_path)],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
         except subprocess.CalledProcessError as e:
             logger.error("git clone falhou (código %s): %s", e.returncode, (e.stderr or "").strip())
             self.cleanup()
@@ -224,10 +227,10 @@ class GitClient:
             "--date=iso-strict",
         ]
 
-        logger.info("Lendo histórico acessível: git log --all --numstat -z ...")
         current_commit: Optional[CommitInfo] = None
         yielded = 0
-        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stderr:
+        with Progress(logger, "Leitura do histórico", "commits processados", run_id=self.progress_id) as progress, \
+                tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stderr:
             with subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=stderr,
             ) as proc:
@@ -238,6 +241,7 @@ class GitClient:
                         if current_commit is not None:
                             yielded += 1
                             yield current_commit
+                            progress.update(yielded)
                         try:
                             chash, aname, aemail, adate_str, parents, subject = [next(tokens) for _ in range(6)]
                         except StopIteration as exc:
@@ -278,7 +282,7 @@ class GitClient:
                 if current_commit is not None:
                     yielded += 1
                     yield current_commit
-        logger.info("Leitura do histórico concluída: %d commits.", yielded)
+                    progress.update(yielded)
 
     def cleanup(self):
         if self.temp_dir:

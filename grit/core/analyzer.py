@@ -5,13 +5,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Generator, List, Optional, Set, Tuple
 
 from .git_client import GitClient
 from .metrics import build_activity, compute_concentration, week_start
 from .models import AttentionConfig, AuthorStats, BlameDetails, BranchReport, CommitInfo, CommitSummary, FileHotspot, RepositoryReport
 from .attention import AttentionAnalyzer, redact_sensitive
 from .normalizer import StudentNormalizer
+from .progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,6 @@ def _module_for_path(path: str) -> str:
     return path.split("/", 1)[0] if "/" in path else "."
 
 
-PROGRESS_EVERY = 100
-BLAME_PROGRESS_EVERY = 25
 MAX_BLAME_FILES = 1500
 BLAME_WORKERS = 4
 ABANDONED_AFTER = timedelta(days=30)  # relativo ao commit mais recente do repositório
@@ -53,6 +52,7 @@ class RepositoryAnalyzer:
         roster_path: Optional[Path] = None,
         include_blame: bool = True,
         attention_config: Optional[AttentionConfig] = None,
+        progress_id: Optional[object] = None,
     ):
         if attention_config is not None:
             if not isinstance(attention_config, AttentionConfig):
@@ -60,7 +60,8 @@ class RepositoryAnalyzer:
             attention_config.validate()
         self.attention_config = attention_config
         self.include_blame = include_blame
-        self.client = GitClient(target_path_or_url)
+        self.progress_id = progress_id
+        self.client = GitClient(target_path_or_url, progress_id=progress_id)
         raw_mailmap = self.client.get_raw_mailmap()
         if roster_path:
             logger.info("Arquivo de turma: %s", roster_path)
@@ -162,12 +163,14 @@ class RepositoryAnalyzer:
 
         if self.client.temp_dir:
             logger.warning("Repositório clonado sem blobs (--filter=blob:none): o git blame pode ser lento.")
-        logger.info("Autoria sobrevivente: git blame em %d arquivos de '%s'...", len(files), ref)
+        logger.info("Autoria sobrevivente: git blame em %d arquivos de '%s'.", len(files), ref)
 
         totals: Dict[str, int] = {}
         modules: Dict[str, Dict[str, int]] = {}
         skipped = 0
-        with ThreadPoolExecutor(max_workers=BLAME_WORKERS) as pool:
+        with Progress(logger, "Autoria sobrevivente", "arquivos processados",
+                      total=len(files), run_id=self.progress_id) as progress, \
+                ThreadPoolExecutor(max_workers=BLAME_WORKERS) as pool:
             results = pool.map(lambda path: self.client.blame_authors(ref, path), files)
             for done, (path, result) in enumerate(zip(files, results), start=1):
                 if result is None:
@@ -179,8 +182,7 @@ class RepositoryAnalyzer:
                         canonical, _ = self.normalizer.get_canonical_identity(name, email)
                         totals[canonical] = totals.get(canonical, 0) + lines
                         module_totals[canonical] = module_totals.get(canonical, 0) + lines
-                if done % BLAME_PROGRESS_EVERY == 0:
-                    logger.info("%d/%d arquivos analisados...", done, len(files))
+                progress.update(done)
 
         total_lines = sum(totals.values())
         for name, lines in totals.items():
@@ -203,6 +205,7 @@ class RepositoryAnalyzer:
 
     def analyze(self) -> RepositoryReport:
         started = time.perf_counter()
+        commits: Optional[Generator[CommitInfo, None, None]] = None
         try:
             default_branch = self.client.get_default_branch()
             authors: Dict[str, AuthorStats] = {}
@@ -243,10 +246,9 @@ class RepositoryAnalyzer:
                 )
 
             logger.info("Processando commits...")
-            for commit in self.client.stream_commits():
+            commits = self.client.stream_commits()
+            for commit in commits:
                 total_commits += 1
-                if total_commits % PROGRESS_EVERY == 0:
-                    logger.info("%d commits processados...", total_commits)
                 canonical_name, email = self.normalizer.get_canonical_identity(
                     commit.author_name, commit.author_email
                 )
@@ -321,7 +323,8 @@ class RepositoryAnalyzer:
                 week_additions, week_deletions = weekly_changes.get(week, (0, 0))
                 weekly_changes[week] = (week_additions + additions, week_deletions + deletions)
 
-            branch_reports = self._analyze_branches(default_branch)
+            with Progress(logger, "Análise de branches", run_id=self.progress_id):
+                branch_reports = self._analyze_branches(default_branch)
 
             blame_ref: Optional[str] = None
             blame_total = 0
@@ -361,8 +364,8 @@ class RepositoryAnalyzer:
 
             attention_report = None
             if attention:
-                logger.info("Analisando pontos de atenção e cobertura...")
-                attention_report = attention.finish(history_ref, history_shallow, branch_reports)
+                with Progress(logger, "Análise de pontos de atenção", run_id=self.progress_id):
+                    attention_report = attention.finish(history_ref, history_shallow, branch_reports)
 
             logger.info(
                 "Análise concluída em %.1fs: %d commits, %d autores, %d mensagens vagas, %d commits diretos na main.",
@@ -398,6 +401,10 @@ class RepositoryAnalyzer:
                 attention=attention_report,
             )
         finally:
-            self.client.cleanup()
+            try:
+                if commits is not None:
+                    commits.close()
+            finally:
+                self.client.cleanup()
 
             

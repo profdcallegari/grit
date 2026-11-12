@@ -62,6 +62,24 @@ class GritAppPresentationTests(unittest.TestCase):
         logger.debug("não deve aparecer novamente")
         self.assertTrue(handler.records.empty())
 
+    def test_progress_updates_status_on_ui_thread_and_ignores_old_runs(self):
+        run_id = object()
+        self.app._active_analysis_id = run_id
+        logger = logging.Logger("test.progress.ui", logging.INFO)
+        logger.addHandler(self.app.log_handler)
+        logger.info("progresso", extra={
+            "grit_progress_id": run_id, "grit_progress_text": "Lendo: 5 commits processados.",
+        })
+        self.app.log_panel._drain()
+        self.assertEqual(self.app.status_var.get(), "Lendo: 5 commits processados.")
+        self.app._set_ui_busy(False)
+        self.app.status_var.set("Concluído")
+        logger.info("antigo", extra={
+            "grit_progress_id": run_id, "grit_progress_text": "Progresso antigo",
+        })
+        self.app.log_panel._drain()
+        self.assertEqual(self.app.status_var.get(), "Concluído")
+
     def test_selected_tab_has_same_height_and_distinct_background(self):
         self.app.deiconify()
         self.app.update()

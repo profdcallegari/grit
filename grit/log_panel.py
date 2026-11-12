@@ -2,7 +2,7 @@ import logging
 import queue
 import tkinter as tk
 from tkinter import filedialog, ttk
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
@@ -18,11 +18,15 @@ class QueueLogHandler(logging.Handler):
     def __init__(self):
         super().__init__(level=logging.INFO)
         self.records: "queue.Queue[Tuple[int, str]]" = queue.Queue()
+        self.progress: "queue.Queue[Tuple[object, str]]" = queue.Queue()
         self.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
 
     def emit(self, record: logging.LogRecord):
         try:
             self.records.put((record.levelno, self.format(record)))
+            run_id = getattr(record, "grit_progress_id", None)
+            if run_id is not None:
+                self.progress.put((run_id, record.grit_progress_text))
         except Exception:
             self.handleError(record)
 
@@ -30,9 +34,11 @@ class QueueLogHandler(logging.Handler):
 class LogPanel(ttk.Frame):
     LEVELS = {"INFO": logging.INFO, "DEBUG": logging.DEBUG}
 
-    def __init__(self, parent: tk.Misc, handler: QueueLogHandler):
+    def __init__(self, parent: tk.Misc, handler: QueueLogHandler,
+                 on_progress: Optional[Callable[[object, str], None]] = None):
         super().__init__(parent, padding=6)
         self.handler = handler
+        self.on_progress = on_progress
         self.handler.setLevel(self.LEVELS[DEFAULT_LEVEL])
         self.autoscroll = tk.BooleanVar(value=True)
         self.level_var = tk.StringVar(value=DEFAULT_LEVEL)
@@ -89,6 +95,13 @@ class LogPanel(ttk.Frame):
 
         if lines:
             self._append(lines)
+        try:
+            while True:
+                run_id, message = self.handler.progress.get_nowait()
+                if self.on_progress is not None:
+                    self.on_progress(run_id, message)
+        except queue.Empty:
+            pass
         self.after(POLL_INTERVAL_MS, self._drain)
 
     def _append(self, lines):

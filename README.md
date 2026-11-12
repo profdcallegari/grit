@@ -122,6 +122,10 @@ Na CLI, o ritmo inclui todas as semanas e os hotspots mostram os 20 maiores por 
 
 Na interface gráfica, os indicadores exibem `—` antes da primeira análise. Identidades destacadas em amarelo têm detalhes na aba **Participação**; no mapa de atividade, a intensidade das cores é relativa à célula com mais commits.
 O painel **Log** inicia no nível INFO; selecione DEBUG para incluir mensagens de depuração.
+Durante etapas demoradas, o log e a barra de status são atualizados aproximadamente a cada
+cinco segundos com a etapa, o tempo decorrido e, quando disponível, a quantidade processada.
+A ausência de novos itens não implica que o processo esteja travado. Os totais são exibidos
+apenas quando conhecidos, e cada etapa concluída informa sua duração.
 
 ### Pontos de atenção
 

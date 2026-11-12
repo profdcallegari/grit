@@ -10,6 +10,7 @@ from unittest.mock import patch
 from grit.core.analyzer import RepositoryAnalyzer
 from grit.core.git_client import GitClient, _nul_tokens
 from grit.core.metrics import file_history_status, history_description
+from grit.core.progress import Progress
 
 
 class DirectoryActivityTests(unittest.TestCase):
@@ -76,6 +77,22 @@ class DirectoryActivityTests(unittest.TestCase):
         client.repo_dir = Path(self.temp.name)
         with self.assertRaisesRegex(RuntimeError, "git log falhou"):
             list(client.stream_commits())
+
+    def test_progress_stops_when_commit_processing_fails(self):
+        created = []
+
+        def make_progress(*args, **kwargs):
+            progress = Progress(*args, **kwargs)
+            created.append(progress)
+            return progress
+
+        analyzer = RepositoryAnalyzer(str(self.repo), include_blame=False)
+        with patch("grit.core.git_client.Progress", side_effect=make_progress), \
+                patch.object(analyzer, "_track_identity", side_effect=ValueError("erro")):
+            with self.assertRaisesRegex(ValueError, "erro"):
+                analyzer.analyze()
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0]._thread.is_alive())
 
     def test_empty_commit_does_not_change_directory_counts(self):
         self.commit("Ana", "empty commit", allow_empty=True)

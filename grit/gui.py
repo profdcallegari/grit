@@ -27,6 +27,7 @@ class GritApp(tk.Tk):
         self.minsize(850, 550)
 
         self.current_report: Optional[RepositoryReport] = None
+        self._active_analysis_id: Optional[object] = None
         self._sort_reverse = False
         self._row_authors: Dict[str, AuthorStats] = {}
         self._part_row_authors: Dict[str, AuthorStats] = {}
@@ -178,7 +179,7 @@ class GritApp(tk.Tk):
         self.attention_panel = AttentionPanel(self.notebook)
         self.notebook.add(self.attention_panel, text=" Atenção ")
 
-        self.log_panel = LogPanel(self.notebook, self.log_handler)
+        self.log_panel = LogPanel(self.notebook, self.log_handler, self._on_analysis_progress)
         self.notebook.add(self.log_panel, text=" Log ")
 
         self._build_participation_tab(participation_tab)
@@ -551,6 +552,7 @@ class GritApp(tk.Tk):
             self.progress_bar.pack(side=tk.BOTTOM, fill=tk.X, before=self.status_bar)
             self.progress_bar.start(10)
         else:
+            self._active_analysis_id = None
             self.btn_run.config(state=tk.NORMAL)
             self.progress_bar.stop()
             self.progress_bar.pack_forget()
@@ -573,26 +575,32 @@ class GritApp(tk.Tk):
         include_blame = self.blame_var.get()
 
         logger.info("Análise solicitada para: %s", repo_target)
+        progress_id = object()
+        self._active_analysis_id = progress_id
         self._set_ui_busy(True)
         self.status_var.set("Analisando repositório... Isso pode levar alguns segundos.")
 
         # Executa a coleta em background para manter a UI responsiva
         threading.Thread(
             target=self._run_analysis_worker,
-            args=(repo_target, roster_path, include_blame, attention_config),
+            args=(repo_target, roster_path, include_blame, attention_config, progress_id),
             daemon=True
         ).start()
 
     def _run_analysis_worker(self, repo_target: str, roster_path: Optional[Path], include_blame: bool,
-                             attention_config: AttentionConfig):
+                             attention_config: AttentionConfig, progress_id: object):
         try:
             analyzer = RepositoryAnalyzer(repo_target, roster_path=roster_path, include_blame=include_blame,
-                                          attention_config=attention_config)
+                                          attention_config=attention_config, progress_id=progress_id)
             report = analyzer.analyze()
             self.after(0, self._render_results, report)
         except Exception as e:
             logger.exception("A análise falhou")
             self.after(0, self._handle_error, str(e))
+
+    def _on_analysis_progress(self, progress_id: object, message: str):
+        if progress_id is self._active_analysis_id:
+            self.status_var.set(message)
 
     def _handle_error(self, err_msg: str):
         self._set_ui_busy(False)
