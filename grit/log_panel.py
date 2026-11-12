@@ -9,13 +9,14 @@ LOG_DATE_FORMAT = "%H:%M:%S"
 MAX_LINES = 5000
 DRAIN_BATCH = 300
 POLL_INTERVAL_MS = 100
+DEFAULT_LEVEL = "INFO"
 
 
 class QueueLogHandler(logging.Handler):
     """Enfileira registros de log (seguro entre threads) para a UI consumir."""
 
     def __init__(self):
-        super().__init__()
+        super().__init__(level=logging.INFO)
         self.records: "queue.Queue[Tuple[int, str]]" = queue.Queue()
         self.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
 
@@ -32,9 +33,9 @@ class LogPanel(ttk.Frame):
     def __init__(self, parent: tk.Misc, handler: QueueLogHandler):
         super().__init__(parent, padding=6)
         self.handler = handler
-        self.handler.setLevel(logging.INFO)
+        self.handler.setLevel(self.LEVELS[DEFAULT_LEVEL])
         self.autoscroll = tk.BooleanVar(value=True)
-        self.level_var = tk.StringVar(value="INFO")
+        self.level_var = tk.StringVar(value=DEFAULT_LEVEL)
 
         self._build()
         self.after(POLL_INTERVAL_MS, self._drain)

@@ -108,6 +108,9 @@ O `.mailmap` do repositório também é respeitado. Quando existe roster ou `.ma
 7. **Identidades não confiáveis:** destaca e-mails ausentes do roster/`.mailmap` ou genéricos (`root@`, `@localhost`, `(none)`), que de outra forma apareceriam como "alunos fantasma".
 8. **Links para o navegador:** na GUI, duplo clique em autor, branch ou commit (aba **Commits**) abre o item no GitHub ou GitLab (inclusive instâncias cujo host contenha `github`/`gitlab`). Requer que o remoto `origin` seja um desses; caso contrário, o motivo aparece no log.
 
+Na interface gráfica, os indicadores exibem `—` antes da primeira análise. Identidades destacadas em amarelo têm detalhes na aba **Participação**; no mapa de atividade, a intensidade das cores é relativa à célula com mais commits.
+O painel **Log** inicia no nível INFO; selecione DEBUG para incluir mensagens de depuração.
+
 ---
 
 ## Arquitetura e decisões técnicas
@@ -128,6 +131,7 @@ grit/
     ├── gui.py               # Interface gráfica (Tkinter/ttk)
     ├── activity_panel.py    # Mapa de calor de atividade semanal (Canvas)
     ├── log_panel.py         # Aba de log (handler thread-safe + painel)
+    ├── ui_theme.py          # Paleta compartilhada da interface
     └── core/
         ├── analyzer.py      # Motor analítico e regras de negócio
         ├── git_client.py    # Chamadas de baixo nível ao Git
