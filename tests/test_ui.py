@@ -2,11 +2,12 @@ import logging
 import tkinter as tk
 import unittest
 from datetime import date, datetime
+from unittest.mock import patch
 
 from grit.activity_panel import ActivityPanel
 from grit.core.models import (
-    ActivityTimeline, AuthorStats, BlameDetails, BranchReport, CommitSummary, FileHotspot, RepositoryReport,
-    WeeklyActivity,
+    ActivityTimeline, AttentionFinding, AttentionReport, AuthorStats, BlameDetails, BranchReport, CommitSummary,
+    FileHotspot, RepositoryReport, WeeklyActivity,
 )
 from grit.gui import GritApp
 
@@ -201,6 +202,63 @@ class GritAppPresentationTests(unittest.TestCase):
         views.select(self.app.shared_tree.master.master)
         self.app.update()
         self.assertGreaterEqual(self.app.shared_tree.winfo_height(), 55)
+
+    def test_attention_filters_details_and_resets_with_new_report(self):
+        panel = self.app.attention_panel
+        report = RepositoryReport(0, {}, [], 0, 0, attention=AttentionReport(
+            findings=[
+                AttentionFinding("commit", "large_commit_files", datetime(2026, 1, 5), "Ana", "30 arquivos", "abc", "Detalhes"),
+                AttentionFinding("arquivo", "large_file", None, "", "2 MB", "file.bin", "Limitação"),
+            ],
+            limitations=["Histórico raso."],
+        ))
+        self.app._render_results(report)
+        self.assertIn("2 ocorrência", panel.summary.get())
+        self.assertEqual(panel.category_counts["commit"].get(), "1")
+        self.assertEqual(panel.category_counts["segurança"].get(), "0")
+        self.assertIn("Histórico raso", panel.coverage_text.get("1.0", "end"))
+        panel.category.set("Commits")
+        panel.author.set("ana")
+        panel.from_date.set("2026-01-05")
+        panel.to_date.set("2026-01-05")
+        panel._apply_filters()
+        rows = panel.tree.get_children()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(panel.tree.item(rows[0], "values")[1], "Muitos arquivos no commit")
+        panel.tree.selection_set(rows[0])
+        panel._show_details()
+        self.assertIn("Detalhes", panel.detail.get("1.0", "end"))
+        panel.from_date.set("2026-02-01")
+        with patch("grit.attention_panel.messagebox.showwarning") as warning:
+            panel._apply_filters()
+        warning.assert_called_once()
+        self.assertEqual(len(panel.tree.get_children()), 1)
+
+        self.app._render_results(RepositoryReport(0, {}, [], 0, 0))
+        self.assertFalse(panel.tree.get_children())
+        self.assertIn("indisponível", panel.summary.get())
+        self.assertEqual(panel.category_counts["commit"].get(), "—")
+
+    def test_attention_configuration_rejects_invalid_values(self):
+        panel = self.app.attention_panel
+        panel.config_vars["deadline"].set("20260101")
+        with self.assertRaises(ValueError):
+            panel.get_config()
+        panel.config_vars["deadline"].set("2026-01-01")
+        panel.config_vars["max_commit_files"].set("0")
+        with self.assertRaises(ValueError):
+            panel.get_config()
+        panel.config_vars["max_commit_files"].set("5")
+        config = panel.get_config()
+        self.assertEqual(config.deadline, date(2026, 1, 1))
+        self.assertEqual(config.max_commit_files, 5)
+
+    def test_attention_is_usable_at_minimum_window_size(self):
+        self.app.geometry("850x550")
+        self.app.deiconify()
+        self.app.notebook.select(self.app.attention_panel)
+        self.app.update()
+        self.assertGreaterEqual(self.app.attention_panel.tree.winfo_height(), 55)
 
 
 class ActivityColorsTests(unittest.TestCase):

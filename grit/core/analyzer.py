@@ -9,7 +9,8 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .git_client import GitClient
 from .metrics import build_activity, compute_concentration, week_start
-from .models import AuthorStats, BlameDetails, BranchReport, CommitInfo, CommitSummary, FileHotspot, RepositoryReport
+from .models import AttentionConfig, AuthorStats, BlameDetails, BranchReport, CommitInfo, CommitSummary, FileHotspot, RepositoryReport
+from .attention import AttentionAnalyzer, redact_sensitive
 from .normalizer import StudentNormalizer
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,13 @@ class RepositoryAnalyzer:
         target_path_or_url: str,
         roster_path: Optional[Path] = None,
         include_blame: bool = True,
+        attention_config: Optional[AttentionConfig] = None,
     ):
+        if attention_config is not None:
+            if not isinstance(attention_config, AttentionConfig):
+                raise ValueError("attention_config deve ser AttentionConfig ou None")
+            attention_config.validate()
+        self.attention_config = attention_config
         self.include_blame = include_blame
         self.client = GitClient(target_path_or_url)
         raw_mailmap = self.client.get_raw_mailmap()
@@ -209,6 +216,7 @@ class RepositoryAnalyzer:
             renamed_paths: Set[str] = set()
             rename_count = 0
             warned_emails: Set[str] = set()
+            attention = AttentionAnalyzer(self.client, self.attention_config) if self.attention_config else None
             links = self.client.get_remote_links()
             try:
                 history_shallow: Optional[bool] = self.client.is_shallow()
@@ -242,11 +250,14 @@ class RepositoryAnalyzer:
                 canonical_name, email = self.normalizer.get_canonical_identity(
                     commit.author_name, commit.author_email
                 )
-                logger.debug(
-                    "%s | %s <%s> -> %s | %s",
-                    commit.hash[:8], commit.author_name, commit.author_email,
-                    canonical_name, commit.message,
-                )
+                if attention is None:
+                    logger.debug(
+                        "%s | %s <%s> -> %s | %s",
+                        commit.hash[:8], commit.author_name, commit.author_email,
+                        canonical_name, commit.message,
+                    )
+                else:
+                    attention.add_commit(commit, canonical_name)
 
                 if canonical_name not in authors:
                     logger.debug("Novo autor identificado: %s", canonical_name)
@@ -258,7 +269,7 @@ class RepositoryAnalyzer:
                         hash=commit.hash,
                         author=canonical_name,
                         timestamp=commit.timestamp,
-                        message=commit.message,
+                        message=redact_sensitive(commit.message) if attention else commit.message,
                         is_merge=commit.is_merge,
                     )
                 )
@@ -348,6 +359,11 @@ class RepositoryAnalyzer:
                     len(flagged), ", ".join(a.canonical_name for a in flagged),
                 )
 
+            attention_report = None
+            if attention:
+                logger.info("Analisando pontos de atenção e cobertura...")
+                attention_report = attention.finish(history_ref, history_shallow, branch_reports)
+
             logger.info(
                 "Análise concluída em %.1fs: %d commits, %d autores, %d mensagens vagas, %d commits diretos na main.",
                 time.perf_counter() - started, total_commits, len(authors),
@@ -379,6 +395,7 @@ class RepositoryAnalyzer:
                 history_shallow=history_shallow,
                 history_ref=history_ref,
                 history_renames=rename_count,
+                attention=attention_report,
             )
         finally:
             self.client.cleanup()

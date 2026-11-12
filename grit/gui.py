@@ -7,10 +7,11 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Dict, Optional
 
 from grit.activity_panel import ActivityPanel
+from grit.attention_panel import AttentionPanel
 from grit.directory_panel import DirectoryPanel
 from grit.core.analyzer import RepositoryAnalyzer
 from grit.core.metrics import active_weeks, blame_description, file_history_status, history_description
-from grit.core.models import AuthorStats, BranchReport, RepositoryReport
+from grit.core.models import AttentionConfig, AuthorStats, BranchReport, RepositoryReport
 from grit.log_panel import LogPanel, QueueLogHandler
 from grit import ui_theme as theme
 
@@ -79,9 +80,9 @@ class GritApp(tk.Tk):
         self.style.configure("StatTitle.TLabel", foreground=theme.MUTED, font=("TkDefaultFont", 9))
         self.style.configure("Status.TLabel", background=theme.ACCENT_LIGHT, foreground=theme.TEXT, padding=(12, 7))
         self.style.configure("TNotebook", background=theme.BACKGROUND, borderwidth=0)
-        self.style.configure("TNotebook.Tab", padding=(14, 8), background=theme.ACCENT_LIGHT, foreground=theme.TEXT)
+        self.style.configure("TNotebook.Tab", padding=(9, 8), background=theme.ACCENT_LIGHT, foreground=theme.TEXT)
         self.style.map("TNotebook.Tab",
-                       padding=[("selected", (14, 8)), ("!selected", (14, 8))],
+                       padding=[("selected", (9, 8)), ("!selected", (9, 8))],
                        background=[("selected", theme.ACCENT), ("active", theme.ACCENT_PALE)],
                        foreground=[("selected", theme.SURFACE)])
         self.style.configure("Treeview", background=theme.SURFACE, fieldbackground=theme.SURFACE,
@@ -173,6 +174,9 @@ class GritApp(tk.Tk):
 
         commits_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
         self.notebook.add(commits_tab, text=" Commits ")
+
+        self.attention_panel = AttentionPanel(self.notebook)
+        self.notebook.add(self.attention_panel, text=" Atenção ")
 
         self.log_panel = LogPanel(self.notebook, self.log_handler)
         self.notebook.add(self.log_panel, text=" Log ")
@@ -559,6 +563,12 @@ class GritApp(tk.Tk):
             messagebox.showwarning("Atenção", "Por favor, indique um repositório Git (local ou URL).")
             return
 
+        try:
+            attention_config = self.attention_panel.get_config()
+        except ValueError as exc:
+            messagebox.showwarning("Configuração inválida", str(exc))
+            return
+
         roster_path = Path(roster_target) if roster_target else None
         include_blame = self.blame_var.get()
 
@@ -569,13 +579,15 @@ class GritApp(tk.Tk):
         # Executa a coleta em background para manter a UI responsiva
         threading.Thread(
             target=self._run_analysis_worker,
-            args=(repo_target, roster_path, include_blame),
+            args=(repo_target, roster_path, include_blame, attention_config),
             daemon=True
         ).start()
 
-    def _run_analysis_worker(self, repo_target: str, roster_path: Optional[Path], include_blame: bool):
+    def _run_analysis_worker(self, repo_target: str, roster_path: Optional[Path], include_blame: bool,
+                             attention_config: AttentionConfig):
         try:
-            analyzer = RepositoryAnalyzer(repo_target, roster_path=roster_path, include_blame=include_blame)
+            analyzer = RepositoryAnalyzer(repo_target, roster_path=roster_path, include_blame=include_blame,
+                                          attention_config=attention_config)
             report = analyzer.analyze()
             self.after(0, self._render_results, report)
         except Exception as e:
@@ -646,6 +658,7 @@ class GritApp(tk.Tk):
         self._render_code(report)
         self._render_directories(report)
         self._render_branches(report)
+        self.attention_panel.show(report.attention)
 
         # Atualiza lista de Commits (o hash completo é o identificador da linha)
         self.commits_tree.delete(*self.commits_tree.get_children())

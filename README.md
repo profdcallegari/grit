@@ -123,6 +123,36 @@ Na CLI, o ritmo inclui todas as semanas e os hotspots mostram os 20 maiores por 
 Na interface gráfica, os indicadores exibem `—` antes da primeira análise. Identidades destacadas em amarelo têm detalhes na aba **Participação**; no mapa de atividade, a intensidade das cores é relativa à célula com mais commits.
 O painel **Log** inicia no nível INFO; selecione DEBUG para incluir mensagens de depuração.
 
+### Pontos de atenção
+
+A aba **Atenção** reúne indícios para revisão, não avaliações automáticas. A tabela permite filtrar
+ocorrências por categoria, autor e datas; selecione uma linha para ver suas evidências e ressalvas.
+Em **Cobertura e limites**, consulte o que não pôde ser analisado ou pode estar incompleto.
+
+Em **Configuração**, ajuste os limites, os caminhos de teste e, opcionalmente, o prazo de entrega
+(formato `AAAA-MM-DD`). As mudanças entram em vigor na próxima análise. Sem prazo, não é possível
+avaliar a concentração de commits perto da entrega.
+
+A aba procura commits grandes ou com muitos diretórios, correções imediatas, possíveis reversões,
+mudanças de código sem testes no mesmo commit, arquivos grandes ou gerados, marcadores de conflito,
+possíveis segredos, branches prolongadas ou inativas e identidades inconsistentes. As regras são
+heurísticas: por exemplo, testes anteriores podem cobrir a alteração e o mesmo nome pode pertencer
+a pessoas diferentes. Para o prazo, há alerta quando pelo menos dois commits e metade dos commits
+com data válida estão na janela configurada até a data de entrega.
+
+A inspeção de conteúdo usa a referência padrão e uma amostra de até 100 commits e 250 blobs
+distintos do histórico, inclusive versões removidas. Ela ignora binários e arquivos acima de
+256 KiB e compartilha um limite de 30 segundos com a análise de branches; outras restrições e a
+contagem efetiva aparecem em **Cobertura e limites**. Em clones parciais, essa inspeção é
+desativada para não solicitar blobs pela rede; outras operações existentes, como `git blame`,
+podem solicitá-los. A duração e a inatividade são estimadas para branches não contidas na
+referência padrão, não a partir da data de criação da branch.
+
+Possíveis segredos são identificados por padrões limitados, podem ser falsos positivos e não
+constituem uma auditoria de segurança. Os achados não exibem o conteúdo dos blobs. Caso uma
+credencial real seja encontrada, removê-la do arquivo atual não elimina sua exposição no histórico:
+é necessário revogá-la ou rotacioná-la.
+
 ---
 
 ## Arquitetura e decisões técnicas
@@ -142,11 +172,13 @@ grit/
     ├── __main__.py          # Ponto de entrada (CLI e seletor de modo)
     ├── gui.py               # Interface gráfica (Tkinter/ttk)
     ├── activity_panel.py    # Mapa de calor de atividade semanal (Canvas)
+    ├── attention_panel.py   # Pontos de atenção e filtros
     ├── directory_panel.py   # Mapa de participação por diretório (Canvas)
     ├── log_panel.py         # Aba de log (handler thread-safe + painel)
     ├── ui_theme.py          # Paleta compartilhada da interface
     └── core/
         ├── analyzer.py      # Motor analítico e regras de negócio
+        ├── attention.py     # Heurísticas e cobertura dos pontos de atenção
         ├── git_client.py    # Chamadas de baixo nível ao Git
         ├── links.py         # URLs web (GitHub/GitLab) de branches, commits e autores
         ├── metrics.py       # Atividade semanal, Gini e concentração

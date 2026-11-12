@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Dict, List, Optional, Set
+from pathlib import PureWindowsPath
+from typing import Dict, List, Optional, Set, Tuple
 
 from .links import RepoLinks
 
@@ -22,6 +23,54 @@ class CommitInfo:
     message: str
     files: List[FileChange] = field(default_factory=list)
     is_merge: bool = False
+    parents: Tuple[str, ...] = ()
+    timestamp_valid: bool = True
+
+
+@dataclass
+class AttentionConfig:
+    max_commit_files: int = 30
+    max_commit_churn: int = 1000
+    max_directories: int = 5
+    max_file_bytes: int = 1048576
+    deadline: Optional[date] = None
+    deadline_days: int = 7
+    test_paths: Tuple[str, ...] = ("tests", "test")
+
+    def __post_init__(self):
+        self.validate()
+
+    def validate(self):
+        for name in ("max_commit_files", "max_commit_churn", "max_directories", "max_file_bytes", "deadline_days"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} deve ser um inteiro positivo")
+        if self.deadline is not None and type(self.deadline) is not date:
+            raise ValueError("deadline deve ser uma data ou None")
+        if not isinstance(self.test_paths, tuple) or not self.test_paths:
+            raise ValueError("test_paths deve ser uma tupla não vazia")
+        for path in self.test_paths:
+            if (not isinstance(path, str) or not path or "\\" in path
+                    or "\0" in path or PureWindowsPath(path).drive
+                    or path.startswith("/") or any(part in ("", ".", "..") for part in path.split("/"))):
+                raise ValueError("test_paths deve conter caminhos relativos válidos separados por /")
+
+
+@dataclass
+class AttentionFinding:
+    category: str
+    kind: str
+    timestamp: Optional[datetime]
+    author: str
+    evidence: str
+    reference: str
+    details: str
+
+
+@dataclass
+class AttentionReport:
+    findings: List[AttentionFinding]
+    limitations: List[str]
 
 
 @dataclass
@@ -154,4 +203,5 @@ class RepositoryReport:
     history_shallow: Optional[bool] = None
     history_ref: Optional[str] = None
     history_renames: int = 0
+    attention: Optional[AttentionReport] = None
     

@@ -207,7 +207,7 @@ class GitClient:
 
     def stream_commits(self) -> Generator[CommitInfo, None, None]:
         """Lê o histórico em streaming, preservando nomes de arquivos e renomeações."""
-        fmt = "%x00GRIT_RECORD%x00%H%x00%an%x00%ae%x00%aI%x00%p%x00%s%x00"
+        fmt = "%x00GRIT_RECORD%x00%H%x00%an%x00%ae%x00%aI%x00%P%x00%s%x00"
 
         cmd = [
             "git",
@@ -244,12 +244,15 @@ class GitClient:
                             raise ValueError("Cabeçalho incompleto na saída do git log.") from exc
                         try:
                             timestamp = datetime.fromisoformat(adate_str)
+                            timestamp_valid = True
                         except ValueError:
                             logger.warning("Data inválida no commit %s (%r); usando data atual.", chash[:8], adate_str)
                             timestamp = datetime.utcnow()
+                            timestamp_valid = False
                         current_commit = CommitInfo(
                             hash=chash, author_name=aname, author_email=aemail, timestamp=timestamp,
                             message=subject.strip(), is_merge=len(parents.strip().split()) > 1,
+                            parents=tuple(parents.strip().split()), timestamp_valid=timestamp_valid,
                         )
                     else:
                         record = token.lstrip("\n")
