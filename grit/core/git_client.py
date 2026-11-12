@@ -1,17 +1,29 @@
 import logging
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Generator, List, NamedTuple, Optional, Set, Tuple
+from typing import BinaryIO, Dict, Generator, Iterator, List, NamedTuple, Optional, Set, Tuple
 
 from .links import RepoLinks, parse_remote_url
 from .models import CommitInfo, FileChange
 
 logger = logging.getLogger(__name__)
+
+
+def _nul_tokens(stream: BinaryIO) -> Iterator[str]:
+    buffer = b""
+    while True:
+        chunk = stream.read(65536)
+        if not chunk:
+            break
+        parts = (buffer + chunk).split(b"\0")
+        buffer = parts.pop()
+        yield from (part.decode("utf-8", errors="replace") for part in parts)
+    if buffer:
+        raise ValueError("Saída do git log terminou sem delimitador NUL.")
 
 
 class BranchRef(NamedTuple):
@@ -21,9 +33,6 @@ class BranchRef(NamedTuple):
 
 
 class GitClient:
-    COMMIT_DELIMITER = "==GRIT_COMMIT_START=="
-    FIELD_DELIMITER = "==GRIT_FIELD_SPLIT=="
-
     def __init__(self, target_path_or_url: str):
         self.target = target_path_or_url
         self.temp_dir: Optional[tempfile.TemporaryDirectory] = None
@@ -136,6 +145,12 @@ class GitClient:
         output = self._run_git(["ls-tree", "-r", "-z", "--name-only", ref])
         return [path for path in output.split("\0") if path]
 
+    def is_shallow(self) -> bool:
+        result = self._run_git(["rev-parse", "--is-shallow-repository"]).strip()
+        if result not in ("true", "false"):
+            raise ValueError(f"Resposta inesperada sobre histórico raso: {result!r}")
+        return result == "true"
+
     def blame_authors(self, ref: str, path: str) -> Optional[Dict[Tuple[str, str], int]]:
         """Linhas atuais do arquivo por (nome, e-mail) do autor; None se o blame falhar."""
         cmd = ["git", "-C", str(self.repo_dir), "blame", "--line-porcelain", "-w", ref, "--", path]
@@ -191,19 +206,8 @@ class GitClient:
         return None
 
     def stream_commits(self) -> Generator[CommitInfo, None, None]:
-        """
-        Lê todo o histórico com logs estruturados e numstat via streaming.
-        """
-        # %H: hash, %an: author name, %ae: author email, %aI: ISO-8601 strict date, %p: parent hashes, %B: body
-        fmt = (
-            f"{self.COMMIT_DELIMITER}%n"
-            f"%H{self.FIELD_DELIMITER}"
-            f"%an{self.FIELD_DELIMITER}"
-            f"%ae{self.FIELD_DELIMITER}"
-            f"%aI{self.FIELD_DELIMITER}"
-            f"%p{self.FIELD_DELIMITER}"
-            f"%s"
-        )
+        """Lê o histórico em streaming, preservando nomes de arquivos e renomeações."""
+        fmt = "%x00GRIT_RECORD%x00%H%x00%an%x00%ae%x00%aI%x00%p%x00%s%x00"
 
         cmd = [
             "git",
@@ -215,75 +219,63 @@ class GitClient:
             "--all",
             f"--pretty=format:{fmt}",
             "--numstat",
+            "--find-renames",
+            "-z",
             "--date=iso-strict",
         ]
 
-        logger.info("Lendo histórico completo: git log --all --numstat ...")
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-
+        logger.info("Lendo histórico acessível: git log --all --numstat -z ...")
         current_commit: Optional[CommitInfo] = None
         yielded = 0
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stderr:
+            with subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=stderr,
+            ) as proc:
+                assert proc.stdout is not None
+                tokens = iter(_nul_tokens(proc.stdout))
+                for token in tokens:
+                    if token == "GRIT_RECORD":
+                        if current_commit is not None:
+                            yielded += 1
+                            yield current_commit
+                        try:
+                            chash, aname, aemail, adate_str, parents, subject = [next(tokens) for _ in range(6)]
+                        except StopIteration as exc:
+                            raise ValueError("Cabeçalho incompleto na saída do git log.") from exc
+                        try:
+                            timestamp = datetime.fromisoformat(adate_str)
+                        except ValueError:
+                            logger.warning("Data inválida no commit %s (%r); usando data atual.", chash[:8], adate_str)
+                            timestamp = datetime.utcnow()
+                        current_commit = CommitInfo(
+                            hash=chash, author_name=aname, author_email=aemail, timestamp=timestamp,
+                            message=subject.strip(), is_merge=len(parents.strip().split()) > 1,
+                        )
+                    else:
+                        record = token.lstrip("\n")
+                        if not record:
+                            continue
+                        parts = record.split("\t", 2)
+                        if current_commit is None or len(parts) != 3:
+                            raise ValueError(f"Registro numstat inválido: {record!r}")
+                        adds_raw, dels_raw, path = parts
+                        adds = int(adds_raw) if adds_raw != "-" else 0
+                        dels = int(dels_raw) if dels_raw != "-" else 0
+                        previous_path = None
+                        if not path:
+                            try:
+                                previous_path, path = next(tokens), next(tokens)
+                            except StopIteration as exc:
+                                raise ValueError("Renomeação incompleta na saída do git log.") from exc
+                        current_commit.files.append(FileChange(path, adds, dels, previous_path))
 
-        for line in proc.stdout:
-            line_str = line.strip()
-            if not line_str:
-                continue
-
-            if line_str == self.COMMIT_DELIMITER:
-                if current_commit:
+                if proc.wait() != 0:
+                    stderr.seek(0)
+                    raise RuntimeError(f"git log falhou (código {proc.returncode}): {stderr.read().strip()}")
+                if current_commit is not None:
                     yielded += 1
                     yield current_commit
-                current_commit = None
-                continue
-
-            if self.FIELD_DELIMITER in line:
-                parts = line.split(self.FIELD_DELIMITER)
-                if len(parts) >= 6:
-                    chash, aname, aemail, adate_str, parents, subject = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5].strip()
-                    try:
-                        timestamp = datetime.fromisoformat(adate_str)
-                    except ValueError:
-                        logger.warning("Data inválida no commit %s (%r); usando data atual.", chash[:8], adate_str)
-                        timestamp = datetime.utcnow()
-
-                    is_merge = len(parents.strip().split()) > 1
-
-                    current_commit = CommitInfo(
-                        hash=chash,
-                        author_name=aname,
-                        author_email=aemail,
-                        timestamp=timestamp,
-                        message=subject,
-                        is_merge=is_merge,
-                        files=[],
-                    )
-            elif current_commit is not None:
-                # Trata as linhas do --numstat: <adds> <dels> <file>
-                match = re.match(r"^(\d+|-)\s+(\d+|-)\s+(.+)$", line_str)
-                if match:
-                    adds_raw, dels_raw, path = match.groups()
-                    adds = int(adds_raw) if adds_raw != "-" else 0
-                    dels = int(dels_raw) if dels_raw != "-" else 0
-                    current_commit.files.append(
-                        FileChange(filepath=path, additions=adds, deletions=dels)
-                    )
-
-        if current_commit:
-            yielded += 1
-            yield current_commit
-
-        proc.wait()
-        if proc.returncode != 0:
-            logger.error("git log terminou com código %s: %s", proc.returncode, proc.stderr.read().strip())
-        else:
-            logger.info("Leitura do histórico concluída: %d commits.", yielded)
+        logger.info("Leitura do histórico concluída: %d commits.", yielded)
 
     def cleanup(self):
         if self.temp_dir:

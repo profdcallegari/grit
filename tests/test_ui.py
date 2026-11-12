@@ -157,6 +157,51 @@ class GritAppPresentationTests(unittest.TestCase):
             self.assertGreaterEqual(first.winfo_height(), 55)
             self.assertGreaterEqual(second.winfo_height(), 55)
 
+    def test_directory_map_shared_filter_sort_and_reset(self):
+        report = RepositoryReport(
+            3, {"Ana": AuthorStats("Ana"), "Bia": AuthorStats("Bia")}, [], 0, 0,
+            directory_activity={"Ana": {".": 1, "src": 2}, "Bia": {"src": 1}},
+            hotspots=[
+                FileHotspot("src/shared.py", 2, 4, 1, authors={"Ana", "Bia"}, renamed=True,
+                            present_in_default=False),
+                FileHotspot("one.py", 3, 1, 0, authors={"Ana"}, present_in_default=True),
+            ],
+            history_shallow=True, history_ref="main", history_renames=1,
+        )
+        self.app._render_results(report)
+        canvas = self.app.directory_panel.canvas
+        texts = [canvas.itemcget(item, "text") for item in canvas.find_all() if canvas.type(item) == "text"]
+        self.assertIn("src", texts)
+        self.assertIn("2", texts)
+        self.assertIn("0", texts)
+        self.assertIn("Histórico raso", self.app.directories_summary.get())
+        rows = self.app.shared_tree.get_children()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("renomeação", self.app.shared_tree.item(rows[0], "values")[-1])
+
+        self.app.shared_only.set(False)
+        self.app._sort_shared_files("commits")
+        rows = self.app.shared_tree.get_children()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(self.app.shared_tree.item(rows[0], "values")[0], "one.py")
+
+        self.app._render_results(RepositoryReport(0, {}, [], 0, 0))
+        self.assertFalse(self.app.shared_tree.get_children())
+        self.assertEqual(len(canvas.find_all()), 1)
+
+    def test_directory_views_are_usable_at_minimum_window_size(self):
+        self.app.geometry("850x550")
+        self.app.deiconify()
+        map_frame = self.app.directory_panel.master
+        views = map_frame.master
+        self.app.notebook.select(views.master)
+        views.select(map_frame)
+        self.app.update()
+        self.assertGreaterEqual(self.app.directory_panel.canvas.winfo_height(), 55)
+        views.select(self.app.shared_tree.master.master)
+        self.app.update()
+        self.assertGreaterEqual(self.app.shared_tree.winfo_height(), 55)
+
 
 class ActivityColorsTests(unittest.TestCase):
     def test_count_labels_have_sufficient_contrast(self):

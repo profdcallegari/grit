@@ -48,7 +48,7 @@ def main():
 
     # Fallback para execução CLI direta
     from grit.core.analyzer import RepositoryAnalyzer
-    from grit.core.metrics import active_weeks, blame_description
+    from grit.core.metrics import active_weeks, blame_description, file_history_status, history_description
 
     if not args.repo:
         parser.error("O argumento 'repo' é obrigatório no modo CLI.")
@@ -123,6 +123,24 @@ def main():
             for name, lines in sorted(authors.items(), key=lambda item: (-item[1], item[0])):
                 share = f"{lines / total:.1%}" if total else "—"
                 print(f"  {module} | {name}: {lines} linhas ({share})")
+
+    print("\nParticipação por diretório (. = raiz; commits por autor):")
+    print(f"  {history_description(report)}")
+    for author, directories in sorted(report.directory_activity.items()):
+        if directories:
+            print(f"  {author}: " + ", ".join(f"{name}={count}" for name, count in sorted(directories.items())))
+    if not any(report.directory_activity.values()):
+        print("  Nenhuma participação por diretório disponível.")
+
+    print("\nArquivos compartilhados (dois ou mais autores):")
+    shared = [item for item in report.hotspots if len(item.authors) >= 2]
+    for item in sorted(shared, key=lambda file: (-len(file.authors), -file.churn, file.path)):
+        print(
+            f"  {item.path}: {', '.join(sorted(item.authors))}; {item.commits} commits; "
+            f"churn {item.churn}; {file_history_status(item, report.history_ref)}"
+        )
+    if not shared:
+        print("  Nenhum arquivo compartilhado encontrado.")
 
 
 if __name__ == "__main__":

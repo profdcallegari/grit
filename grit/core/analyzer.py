@@ -1,5 +1,6 @@
 import logging
 import re
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -12,6 +13,11 @@ from .models import AuthorStats, BlameDetails, BranchReport, CommitInfo, CommitS
 from .normalizer import StudentNormalizer
 
 logger = logging.getLogger(__name__)
+
+
+def _module_for_path(path: str) -> str:
+    return path.split("/", 1)[0] if "/" in path else "."
+
 
 PROGRESS_EVERY = 100
 BLAME_PROGRESS_EVERY = 25
@@ -160,7 +166,7 @@ class RepositoryAnalyzer:
                 if result is None:
                     skipped += 1
                 else:
-                    module = path.split("/", 1)[0] if "/" in path else "."
+                    module = _module_for_path(path)
                     module_totals = modules.setdefault(module, {})
                     for (name, email), lines in result.items():
                         canonical, _ = self.normalizer.get_canonical_identity(name, email)
@@ -199,8 +205,23 @@ class RepositoryAnalyzer:
             commit_summaries: List[CommitSummary] = []
             weekly_changes: Dict[date, Tuple[int, int]] = {}
             hotspots: Dict[str, FileHotspot] = {}
+            directory_activity: Dict[str, Dict[str, int]] = {}
+            renamed_paths: Set[str] = set()
+            rename_count = 0
             warned_emails: Set[str] = set()
             links = self.client.get_remote_links()
+            try:
+                history_shallow: Optional[bool] = self.client.is_shallow()
+            except (subprocess.CalledProcessError, ValueError) as exc:
+                history_shallow = None
+                logger.warning("Não foi possível verificar se o histórico é raso: %s", exc)
+            try:
+                history_ref: Optional[str] = self.client.resolve_ref(default_branch)
+                current_files: Optional[Set[str]] = set(self.client.list_files(history_ref))
+            except subprocess.CalledProcessError as exc:
+                history_ref = None
+                current_files = None
+                logger.warning("Não foi possível verificar arquivos na branch padrão: %s", exc)
             # Obtém commits acessíveis na branch default
             default_branch_commits: Set[str] = set()
             try:
@@ -260,6 +281,7 @@ class RepositoryAnalyzer:
                 # Métricas de arquivos e linhas (churn)
                 additions = deletions = 0
                 touched_in_commit: Set[str] = set()
+                touched_directories: Set[str] = set()
                 for file_change in commit.files:
                     if self._should_ignore_file(file_change.filepath):
                         continue
@@ -271,9 +293,18 @@ class RepositoryAnalyzer:
                     hotspot = hotspots.setdefault(file_change.filepath, FileHotspot(path=file_change.filepath))
                     hotspot.additions += file_change.additions
                     hotspot.deletions += file_change.deletions
+                    hotspot.authors.add(canonical_name)
+                    touched_directories.add(_module_for_path(file_change.filepath))
+                    if file_change.previous_path is not None:
+                        rename_count += 1
+                        renamed_paths.update((file_change.previous_path, file_change.filepath))
                     if file_change.filepath not in touched_in_commit:
                         hotspot.commits += 1
                         touched_in_commit.add(file_change.filepath)
+
+                author_directories = directory_activity.setdefault(canonical_name, {})
+                for directory in touched_directories:
+                    author_directories[directory] = author_directories.get(directory, 0) + 1
 
                 week = week_start(commit.timestamp.date())
                 week_additions, week_deletions = weekly_changes.get(week, (0, 0))
@@ -296,6 +327,9 @@ class RepositoryAnalyzer:
                 logger.info("Autoria sobrevivente (git blame) desativada.")
 
             activity = build_activity(authors, weekly_changes)
+            for path, hotspot in hotspots.items():
+                hotspot.renamed = path in renamed_paths
+                hotspot.present_in_default = path in current_files if current_files is not None else None
             concentration = compute_concentration(authors)
             logger.info(
                 "Concentração: Gini de commits %.2f, Gini de linhas %.2f; maior participação: %s (%.0f%% dos commits).",
@@ -341,6 +375,10 @@ class RepositoryAnalyzer:
                 blame_status=blame_status,
                 blame_details=blame_details,
                 hotspots=sorted(hotspots.values(), key=lambda item: (-item.churn, -item.commits, item.path)),
+                directory_activity=directory_activity,
+                history_shallow=history_shallow,
+                history_ref=history_ref,
+                history_renames=rename_count,
             )
         finally:
             self.client.cleanup()

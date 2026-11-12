@@ -7,8 +7,9 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Dict, Optional
 
 from grit.activity_panel import ActivityPanel
+from grit.directory_panel import DirectoryPanel
 from grit.core.analyzer import RepositoryAnalyzer
-from grit.core.metrics import active_weeks, blame_description
+from grit.core.metrics import active_weeks, blame_description, file_history_status, history_description
 from grit.core.models import AuthorStats, BranchReport, RepositoryReport
 from grit.log_panel import LogPanel, QueueLogHandler
 from grit import ui_theme as theme
@@ -164,6 +165,9 @@ class GritApp(tk.Tk):
         code_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
         self.notebook.add(code_tab, text=" Código ")
 
+        directories_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
+        self.notebook.add(directories_tab, text=" Diretórios ")
+
         branches_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
         self.notebook.add(branches_tab, text=" Branches ")
 
@@ -176,6 +180,7 @@ class GritApp(tk.Tk):
         self._build_participation_tab(participation_tab)
         self._build_rhythm_tab(rhythm_tab)
         self._build_code_tab(code_tab)
+        self._build_directories_tab(directories_tab)
         self._build_branches_tab(branches_tab)
         self._build_commits_tab(commits_tab)
 
@@ -303,13 +308,17 @@ class GritApp(tk.Tk):
 
         self.branches_tree.bind("<Double-1>", self._on_branches_tab_double_click)
 
-    def _build_metrics_table(self, parent: tk.Misc, title: str, columns):
+    def _build_metrics_table(self, parent: tk.Misc, title: str, columns, horizontal=False):
         frame = ttk.LabelFrame(parent, text=f" {title} ", padding=4)
         tree = ttk.Treeview(frame, columns=[key for key, _, _ in columns], show="headings", selectmode="browse")
         for key, label, width in columns:
             tree.heading(key, text=label)
             tree.column(key, width=width, minwidth=55, anchor=tk.W if key in ("name", "path", "module") else tk.E)
         self._configure_rows(tree)
+        if horizontal:
+            scroll_x = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=tree.xview)
+            tree.configure(xscrollcommand=scroll_x.set)
+            scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -355,6 +364,66 @@ class GritApp(tk.Tk):
         self.hotspot_tree.heading("churn", command=lambda: self._render_hotspots("churn"))
         hotspot_frame.grid(row=0, column=0, sticky=tk.NSEW)
         module_frame.grid(row=1, column=0, sticky=tk.NSEW)
+
+    def _build_directories_tab(self, parent: ttk.Frame):
+        self.directories_summary = tk.StringVar(value="Execute uma análise para ver a participação por diretório.")
+        ttk.Label(parent, textvariable=self.directories_summary, style="StatTitle.TLabel").pack(anchor=tk.W)
+        views = ttk.Notebook(parent)
+        views.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        map_frame = ttk.Frame(views, padding=4)
+        shared_frame = ttk.Frame(views, padding=4)
+        views.add(map_frame, text=" Mapa por diretório ")
+        views.add(shared_frame, text=" Arquivos compartilhados ")
+        ttk.Label(map_frame, text="Células: commits por autor (mais escuro = mais commits); . = raiz.",
+                  style="StatTitle.TLabel").pack(anchor=tk.W)
+        self.directory_panel = DirectoryPanel(map_frame)
+        self.directory_panel.pack(fill=tk.BOTH, expand=True)
+
+        self.shared_only = tk.BooleanVar(value=True)
+        ttk.Checkbutton(shared_frame, text="Somente arquivos com dois ou mais autores",
+                        variable=self.shared_only, command=self._render_shared_files).pack(anchor=tk.W)
+        ttk.Label(shared_frame, text="O mesmo arquivo não comprova colaboração; renomeações não são consolidadas.",
+                  style="StatTitle.TLabel").pack(anchor=tk.W)
+        table_frame, self.shared_tree = self._build_metrics_table(
+            shared_frame, "Arquivos no histórico (clique em Autores, Commits ou Churn para ordenar)", (
+                ("path", "Arquivo", 250), ("name", "Autores", 200), ("authors", "Nº autores", 85),
+                ("commits", "Commits", 75), ("churn", "Churn", 75), ("status", "Estado", 160),
+            ), horizontal=True,
+        )
+        table_frame.pack(fill=tk.BOTH, expand=True)
+        self.shared_order = "authors"
+        for key in ("authors", "commits", "churn"):
+            self.shared_tree.heading(key, command=lambda column=key: self._sort_shared_files(column))
+
+    def _sort_shared_files(self, column: str):
+        self.shared_order = column
+        self._render_shared_files()
+
+    def _render_shared_files(self):
+        self.shared_tree.delete(*self.shared_tree.get_children())
+        report = self.current_report
+        if report is None:
+            return
+        files = [item for item in report.hotspots if not self.shared_only.get() or len(item.authors) >= 2]
+        def sort_key(item):
+            if self.shared_order == "authors":
+                value = len(item.authors)
+            elif self.shared_order == "commits":
+                value = item.commits
+            else:
+                value = item.churn
+            return -value, -item.churn, item.path
+        for index, file in enumerate(sorted(files, key=sort_key)):
+            self.shared_tree.insert("", tk.END, values=(
+                file.path, ", ".join(sorted(file.authors)), len(file.authors), file.commits, file.churn,
+                file_history_status(file, report.history_ref),
+            ), tags=("stripe",) if index % 2 else ())
+
+    def _render_directories(self, report: RepositoryReport):
+        shared = sum(len(file.authors) >= 2 for file in report.hotspots)
+        self.directories_summary.set(f"{history_description(report)} Compartilhados: {shared}.")
+        self.directory_panel.show(report.directory_activity)
+        self._render_shared_files()
 
     def _build_commits_tab(self, parent: ttk.Frame):
         self.commits_summary = tk.StringVar(value="Execute uma análise para ver os commits.")
@@ -575,6 +644,7 @@ class GritApp(tk.Tk):
         self.activity_panel.show(report.activity, [a.canonical_name for a in sorted_authors], analyzed=True)
         self._render_rhythm(report, sorted_authors)
         self._render_code(report)
+        self._render_directories(report)
         self._render_branches(report)
 
         # Atualiza lista de Commits (o hash completo é o identificador da linha)

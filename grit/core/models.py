@@ -10,6 +10,7 @@ class FileChange:
     filepath: str
     additions: int
     deletions: int
+    previous_path: Optional[str] = None
 
 
 @dataclass
@@ -104,6 +105,9 @@ class FileHotspot:
     commits: int = 0
     additions: int = 0
     deletions: int = 0
+    authors: Set[str] = field(default_factory=set)
+    renamed: bool = False
+    present_in_default: Optional[bool] = None
 
     @property
     def churn(self) -> int:
@@ -146,4 +150,8 @@ class RepositoryReport:
     blame_status: str = "disabled"  # disabled | failed | completed
     blame_details: Optional[BlameDetails] = None
     hotspots: List[FileHotspot] = field(default_factory=list)
+    directory_activity: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    history_shallow: Optional[bool] = None
+    history_ref: Optional[str] = None
+    history_renames: int = 0
     

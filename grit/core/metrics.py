@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from .models import ActivityTimeline, AuthorStats, Concentration, RepositoryReport, WeeklyActivity
+from .models import ActivityTimeline, AuthorStats, Concentration, FileHotspot, RepositoryReport, WeeklyActivity
 
 
 def week_start(day: date) -> date:
@@ -60,6 +60,22 @@ def blame_description(report: RepositoryReport) -> str:
         f"{prefix} em {report.blame_ref}: {details.analyzed_files}/{details.eligible_files} arquivos; "
         f"{details.failed_files} com falha, {omitted} fora do limite."
     )
+
+
+def history_description(report: RepositoryReport) -> str:
+    if report.history_shallow is None:
+        scope = "Histórico raso: desconhecido"
+    else:
+        scope = "Histórico raso" if report.history_shallow else "Histórico não raso"
+    return f"{scope}; refs acessíveis; {report.history_renames} renomeação(ões), sem consolidar nomes."
+
+
+def file_history_status(file: FileHotspot, ref: Optional[str]) -> str:
+    if file.present_in_default is None or ref is None:
+        status = "presença desconhecida"
+    else:
+        status = f"em {ref}" if file.present_in_default else f"fora de {ref}"
+    return f"{status}; renomeação" if file.renamed else status
 
 
 def gini(values: List[float]) -> float:
