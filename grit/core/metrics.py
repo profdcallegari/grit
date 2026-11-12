@@ -1,7 +1,7 @@
 from datetime import date, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
-from .models import ActivityTimeline, AuthorStats, Concentration
+from .models import ActivityTimeline, AuthorStats, Concentration, RepositoryReport, WeeklyActivity
 
 
 def week_start(day: date) -> date:
@@ -9,7 +9,10 @@ def week_start(day: date) -> date:
     return day - timedelta(days=day.weekday())
 
 
-def build_activity(authors: Dict[str, AuthorStats]) -> ActivityTimeline:
+def build_activity(
+    authors: Dict[str, AuthorStats],
+    weekly_changes: Optional[Dict[date, Tuple[int, int]]] = None,
+) -> ActivityTimeline:
     counts: Dict[str, Dict[date, int]] = {}
     first = last = None
 
@@ -28,7 +31,35 @@ def build_activity(authors: Dict[str, AuthorStats]) -> ActivityTimeline:
         while current <= last:
             weeks.append(current)
             current += timedelta(days=7)
-    return ActivityTimeline(weeks=weeks, counts=counts)
+    changes = weekly_changes or {}
+    weekly = []
+    for week in weeks:
+        activity = [per_week.get(week, 0) for per_week in counts.values()]
+        additions, deletions = changes.get(week, (0, 0))
+        weekly.append(WeeklyActivity(week, sum(activity), additions, deletions, sum(c > 0 for c in activity)))
+    return ActivityTimeline(weeks=weeks, counts=counts, weekly=weekly)
+
+
+def active_weeks(timeline: ActivityTimeline, author: Optional[str] = None) -> int:
+    if author is not None:
+        return sum(count > 0 for count in timeline.counts.get(author, {}).values())
+    return sum(any(per_week.get(week, 0) > 0 for per_week in timeline.counts.values())
+               for week in timeline.weeks)
+
+
+def blame_description(report: RepositoryReport) -> str:
+    if report.blame_status == "disabled":
+        return "Autoria por módulo indisponível: git blame desativado."
+    if report.blame_status == "failed" or report.blame_details is None:
+        return "Autoria por módulo indisponível: falha no git blame; consulte o log."
+    details = report.blame_details
+    omitted = details.eligible_files - details.analyzed_files - details.failed_files
+    partial = details.failed_files > 0 or omitted > 0
+    prefix = "Autoria parcial" if partial else "Autoria"
+    return (
+        f"{prefix} em {report.blame_ref}: {details.analyzed_files}/{details.eligible_files} arquivos; "
+        f"{details.failed_files} com falha, {omitted} fora do limite."
+    )
 
 
 def gini(values: List[float]) -> float:

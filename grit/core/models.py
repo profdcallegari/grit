@@ -83,9 +83,39 @@ class CommitSummary:
 
 
 @dataclass
+class WeeklyActivity:
+    week: date
+    commits: int
+    additions: int
+    deletions: int
+    active_authors: int
+
+
+@dataclass
 class ActivityTimeline:
     weeks: List[date]  # segundas-feiras, contíguas, da primeira à última semana com commits
     counts: Dict[str, Dict[date, int]]  # autor -> semana -> commits
+    weekly: List[WeeklyActivity] = field(default_factory=list)
+
+
+@dataclass
+class FileHotspot:
+    path: str
+    commits: int = 0
+    additions: int = 0
+    deletions: int = 0
+
+    @property
+    def churn(self) -> int:
+        return self.additions + self.deletions
+
+
+@dataclass
+class BlameDetails:
+    modules: Dict[str, Dict[str, int]]
+    eligible_files: int
+    analyzed_files: int
+    failed_files: int
 
 
 @dataclass
@@ -113,4 +143,7 @@ class RepositoryReport:
     concentration: Optional[Concentration] = None
     blame_ref: Optional[str] = None
     blame_total_lines: int = 0
+    blame_status: str = "disabled"  # disabled | failed | completed
+    blame_details: Optional[BlameDetails] = None
+    hotspots: List[FileHotspot] = field(default_factory=list)
     

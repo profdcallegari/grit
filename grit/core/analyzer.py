@@ -2,13 +2,13 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from .git_client import GitClient
-from .metrics import build_activity, compute_concentration
-from .models import AuthorStats, BranchReport, CommitInfo, CommitSummary, RepositoryReport
+from .metrics import build_activity, compute_concentration, week_start
+from .models import AuthorStats, BlameDetails, BranchReport, CommitInfo, CommitSummary, FileHotspot, RepositoryReport
 from .normalizer import StudentNormalizer
 
 logger = logging.getLogger(__name__)
@@ -132,14 +132,15 @@ class RepositoryAnalyzer:
 
     def _compute_surviving_authorship(
         self, authors: Dict[str, AuthorStats], default_branch: str
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, int, BlameDetails]:
         """Conta, via git blame, quantas linhas atuais da branch padrão pertencem a cada autor."""
         ref = self.client.resolve_ref(default_branch)
         files = [
             f for f in self.client.list_files(ref)
             if not self._should_ignore_file(f) and Path(f).suffix.lower() not in BINARY_EXTENSIONS
         ]
-        if len(files) > MAX_BLAME_FILES:
+        eligible_files = len(files)
+        if eligible_files > MAX_BLAME_FILES:
             logger.warning(
                 "%d arquivos elegíveis; analisando apenas os primeiros %d para limitar o tempo.",
                 len(files), MAX_BLAME_FILES,
@@ -151,16 +152,20 @@ class RepositoryAnalyzer:
         logger.info("Autoria sobrevivente: git blame em %d arquivos de '%s'...", len(files), ref)
 
         totals: Dict[str, int] = {}
+        modules: Dict[str, Dict[str, int]] = {}
         skipped = 0
         with ThreadPoolExecutor(max_workers=BLAME_WORKERS) as pool:
             results = pool.map(lambda path: self.client.blame_authors(ref, path), files)
-            for done, result in enumerate(results, start=1):
+            for done, (path, result) in enumerate(zip(files, results), start=1):
                 if result is None:
                     skipped += 1
                 else:
+                    module = path.split("/", 1)[0] if "/" in path else "."
+                    module_totals = modules.setdefault(module, {})
                     for (name, email), lines in result.items():
                         canonical, _ = self.normalizer.get_canonical_identity(name, email)
                         totals[canonical] = totals.get(canonical, 0) + lines
+                        module_totals[canonical] = module_totals.get(canonical, 0) + lines
                 if done % BLAME_PROGRESS_EVERY == 0:
                     logger.info("%d/%d arquivos analisados...", done, len(files))
 
@@ -176,7 +181,12 @@ class RepositoryAnalyzer:
             "Autoria sobrevivente concluída: %d linhas em %d arquivos (%d ignorados por erro).",
             total_lines, len(files) - skipped, skipped,
         )
-        return ref, total_lines
+        return ref, total_lines, BlameDetails(
+            modules=modules,
+            eligible_files=eligible_files,
+            analyzed_files=len(files) - skipped,
+            failed_files=skipped,
+        )
 
     def analyze(self) -> RepositoryReport:
         started = time.perf_counter()
@@ -187,6 +197,8 @@ class RepositoryAnalyzer:
             suspicious_count = 0
             direct_main_commits = 0
             commit_summaries: List[CommitSummary] = []
+            weekly_changes: Dict[date, Tuple[int, int]] = {}
+            hotspots: Dict[str, FileHotspot] = {}
             warned_emails: Set[str] = set()
             links = self.client.get_remote_links()
             # Obtém commits acessíveis na branch default
@@ -246,26 +258,44 @@ class RepositoryAnalyzer:
                     direct_main_commits += 1
 
                 # Métricas de arquivos e linhas (churn)
+                additions = deletions = 0
+                touched_in_commit: Set[str] = set()
                 for file_change in commit.files:
                     if self._should_ignore_file(file_change.filepath):
                         continue
                     author.additions += file_change.additions
                     author.deletions += file_change.deletions
                     author.files_touched.add(file_change.filepath)
+                    additions += file_change.additions
+                    deletions += file_change.deletions
+                    hotspot = hotspots.setdefault(file_change.filepath, FileHotspot(path=file_change.filepath))
+                    hotspot.additions += file_change.additions
+                    hotspot.deletions += file_change.deletions
+                    if file_change.filepath not in touched_in_commit:
+                        hotspot.commits += 1
+                        touched_in_commit.add(file_change.filepath)
+
+                week = week_start(commit.timestamp.date())
+                week_additions, week_deletions = weekly_changes.get(week, (0, 0))
+                weekly_changes[week] = (week_additions + additions, week_deletions + deletions)
 
             branch_reports = self._analyze_branches(default_branch)
 
             blame_ref: Optional[str] = None
             blame_total = 0
+            blame_status = "disabled"
+            blame_details = None
             if self.include_blame:
                 try:
-                    blame_ref, blame_total = self._compute_surviving_authorship(authors, default_branch)
+                    blame_ref, blame_total, blame_details = self._compute_surviving_authorship(authors, default_branch)
+                    blame_status = "completed"
                 except Exception:
+                    blame_status = "failed"
                     logger.exception("Falha ao calcular a autoria sobrevivente; seguindo sem ela.")
             else:
                 logger.info("Autoria sobrevivente (git blame) desativada.")
 
-            activity = build_activity(authors)
+            activity = build_activity(authors, weekly_changes)
             concentration = compute_concentration(authors)
             logger.info(
                 "Concentração: Gini de commits %.2f, Gini de linhas %.2f; maior participação: %s (%.0f%% dos commits).",
@@ -308,6 +338,9 @@ class RepositoryAnalyzer:
                 concentration=concentration,
                 blame_ref=blame_ref,
                 blame_total_lines=blame_total,
+                blame_status=blame_status,
+                blame_details=blame_details,
+                hotspots=sorted(hotspots.values(), key=lambda item: (-item.churn, -item.commits, item.path)),
             )
         finally:
             self.client.cleanup()

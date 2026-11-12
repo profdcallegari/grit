@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 from grit.activity_panel import ActivityPanel
 from grit.core.analyzer import RepositoryAnalyzer
+from grit.core.metrics import active_weeks, blame_description
 from grit.core.models import AuthorStats, BranchReport, RepositoryReport
 from grit.log_panel import LogPanel, QueueLogHandler
 from grit import ui_theme as theme
@@ -157,6 +158,12 @@ class GritApp(tk.Tk):
         self.activity_panel = ActivityPanel(self.notebook)
         self.notebook.add(self.activity_panel, text=" Atividade ")
 
+        rhythm_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
+        self.notebook.add(rhythm_tab, text=" Ritmo ")
+
+        code_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
+        self.notebook.add(code_tab, text=" Código ")
+
         branches_tab = ttk.Frame(self.notebook, padding=(0, 6, 0, 0))
         self.notebook.add(branches_tab, text=" Branches ")
 
@@ -167,6 +174,8 @@ class GritApp(tk.Tk):
         self.notebook.add(self.log_panel, text=" Log ")
 
         self._build_participation_tab(participation_tab)
+        self._build_rhythm_tab(rhythm_tab)
+        self._build_code_tab(code_tab)
         self._build_branches_tab(branches_tab)
         self._build_commits_tab(commits_tab)
 
@@ -293,6 +302,59 @@ class GritApp(tk.Tk):
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.branches_tree.bind("<Double-1>", self._on_branches_tab_double_click)
+
+    def _build_metrics_table(self, parent: tk.Misc, title: str, columns):
+        frame = ttk.LabelFrame(parent, text=f" {title} ", padding=4)
+        tree = ttk.Treeview(frame, columns=[key for key, _, _ in columns], show="headings", selectmode="browse")
+        for key, label, width in columns:
+            tree.heading(key, text=label)
+            tree.column(key, width=width, minwidth=55, anchor=tk.W if key in ("name", "path", "module") else tk.E)
+        self._configure_rows(tree)
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        return frame, tree
+
+    def _build_rhythm_tab(self, parent: ttk.Frame):
+        self.rhythm_summary = tk.StringVar(value="Execute uma análise para ver o ritmo semanal.")
+        ttk.Label(parent, textvariable=self.rhythm_summary, style="StatTitle.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        pane = ttk.Frame(parent)
+        pane.pack(fill=tk.BOTH, expand=True)
+        pane.columnconfigure(0, weight=1)
+        pane.rowconfigure(0, weight=1, uniform="metrics")
+        pane.rowconfigure(1, weight=1, uniform="metrics")
+        weekly_frame, self.weekly_tree = self._build_metrics_table(pane, "Ritmo semanal", (
+            ("week", "Semana (segunda)", 150), ("commits", "Commits", 90),
+            ("adds", "+ Linhas", 100), ("dels", "- Linhas", 100), ("authors", "Autores ativos", 120),
+        ))
+        regularity_frame, self.regularity_tree = self._build_metrics_table(pane, "Regularidade por autor", (
+            ("name", "Aluno / Autor", 230), ("active", "Semanas ativas", 120),
+            ("total", "Semanas no período", 130), ("rate", "Regularidade", 120),
+        ))
+        weekly_frame.grid(row=0, column=0, sticky=tk.NSEW)
+        regularity_frame.grid(row=1, column=0, sticky=tk.NSEW)
+
+    def _build_code_tab(self, parent: ttk.Frame):
+        self.code_summary = tk.StringVar(value="Execute uma análise para ver os hotspots e a autoria por módulo.")
+        ttk.Label(parent, textvariable=self.code_summary, style="StatTitle.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        pane = ttk.Frame(parent)
+        pane.pack(fill=tk.BOTH, expand=True)
+        pane.columnconfigure(0, weight=1)
+        pane.rowconfigure(0, weight=1, uniform="metrics")
+        pane.rowconfigure(1, weight=1, uniform="metrics")
+        hotspot_frame, self.hotspot_tree = self._build_metrics_table(pane, "Hotspots (clique em Commits ou Churn para ordenar)", (
+            ("path", "Arquivo", 350), ("commits", "Commits", 90),
+            ("adds", "+ Linhas", 90), ("dels", "- Linhas", 90), ("churn", "Churn", 90),
+        ))
+        module_frame, self.module_tree = self._build_metrics_table(pane, "Autoria sobrevivente por módulo (. = raiz)", (
+            ("module", "Módulo", 200), ("name", "Aluno / Autor", 220),
+            ("lines", "Linhas", 100), ("share", "% no módulo", 110),
+        ))
+        self.hotspot_tree.heading("commits", command=lambda: self._render_hotspots("commits"))
+        self.hotspot_tree.heading("churn", command=lambda: self._render_hotspots("churn"))
+        hotspot_frame.grid(row=0, column=0, sticky=tk.NSEW)
+        module_frame.grid(row=1, column=0, sticky=tk.NSEW)
 
     def _build_commits_tab(self, parent: ttk.Frame):
         self.commits_summary = tk.StringVar(value="Execute uma análise para ver os commits.")
@@ -511,6 +573,8 @@ class GritApp(tk.Tk):
 
         self._render_participation(report, sorted_authors)
         self.activity_panel.show(report.activity, [a.canonical_name for a in sorted_authors], analyzed=True)
+        self._render_rhythm(report, sorted_authors)
+        self._render_code(report)
         self._render_branches(report)
 
         # Atualiza lista de Commits (o hash completo é o identificador da linha)
@@ -528,6 +592,56 @@ class GritApp(tk.Tk):
                 ),
                 tags=("stripe",) if index % 2 else (),
             )
+
+    def _render_rhythm(self, report: RepositoryReport, sorted_authors):
+        self.weekly_tree.delete(*self.weekly_tree.get_children())
+        self.regularity_tree.delete(*self.regularity_tree.get_children())
+        activity = report.activity
+        if not activity or not activity.weeks:
+            self.rhythm_summary.set("Nenhuma atividade semanal disponível nesta análise.")
+            return
+        total = len(activity.weeks)
+        active = active_weeks(activity)
+        self.rhythm_summary.set(
+            f"Período: {activity.weeks[0]:%d/%m/%Y} a {activity.weeks[-1]:%d/%m/%Y} "
+            f"(início das semanas) · Equipe: {active}/{total} semanas ativas ({active / total:.1%})."
+        )
+        for index, week in enumerate(activity.weekly):
+            self.weekly_tree.insert("", tk.END, values=(
+                week.week.strftime("%d/%m/%Y"), week.commits, week.additions, week.deletions, week.active_authors,
+            ), tags=("stripe",) if index % 2 else ())
+        for index, author in enumerate(sorted_authors):
+            count = active_weeks(activity, author.canonical_name)
+            self.regularity_tree.insert("", tk.END, values=(
+                author.canonical_name, count, total, f"{count / total:.1%}",
+            ), tags=("stripe",) if index % 2 else ())
+
+    def _render_code(self, report: RepositoryReport):
+        self.module_tree.delete(*self.module_tree.get_children())
+        self.code_summary.set(blame_description(report))
+        self._render_hotspots("churn")
+        if report.blame_details is not None:
+            index = 0
+            for module, authors in sorted(report.blame_details.modules.items()):
+                total = sum(authors.values())
+                for name, lines in sorted(authors.items(), key=lambda item: (-item[1], item[0])):
+                    self.module_tree.insert("", tk.END, values=(
+                        module, name, lines, f"{lines / total:.1%}" if total else "—",
+                    ), tags=("stripe",) if index % 2 else ())
+                    index += 1
+
+    def _render_hotspots(self, order: str):
+        self.hotspot_tree.delete(*self.hotspot_tree.get_children())
+        if self.current_report is None:
+            return
+        if order == "commits":
+            hotspots = sorted(self.current_report.hotspots, key=lambda item: (-item.commits, -item.churn, item.path))
+        else:
+            hotspots = sorted(self.current_report.hotspots, key=lambda item: (-item.churn, -item.commits, item.path))
+        for index, hotspot in enumerate(hotspots):
+            self.hotspot_tree.insert("", tk.END, values=(
+                hotspot.path, hotspot.commits, hotspot.additions, hotspot.deletions, hotspot.churn,
+            ), tags=("stripe",) if index % 2 else ())
 
     def _render_participation(self, report: RepositoryReport, sorted_authors):
         concentration = report.concentration

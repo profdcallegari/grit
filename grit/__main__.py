@@ -48,6 +48,7 @@ def main():
 
     # Fallback para execução CLI direta
     from grit.core.analyzer import RepositoryAnalyzer
+    from grit.core.metrics import active_weeks, blame_description
 
     if not args.repo:
         parser.error("O argumento 'repo' é obrigatório no modo CLI.")
@@ -84,6 +85,44 @@ def main():
     for b in report.branches:
         when = b.last_commit_date.strftime("%Y-%m-%d") if b.last_commit_date else "-"
         print(f"  {b.name:<40} {b.status:<11} último commit: {when}")
+
+    activity = report.activity
+    print("\nRitmo semanal (semana iniciada na segunda-feira):")
+    if activity and activity.weeks:
+        total = len(activity.weeks)
+        active = active_weeks(activity)
+        print(f"  Equipe: {active}/{total} semanas ativas ({active / total:.1%}).")
+        for week in activity.weekly:
+            print(
+                f"  {week.week:%Y-%m-%d}: {week.commits} commits, "
+                f"+{week.additions}/-{week.deletions} linhas, {week.active_authors} autores ativos"
+            )
+        print("  Regularidade por autor:")
+        for name in sorted(activity.counts):
+            count = active_weeks(activity, name)
+            print(f"    {name}: {count}/{total} semanas ({count / total:.1%})")
+    else:
+        print("  Nenhuma atividade semanal disponível.")
+
+    print("\nHotspots por arquivo (até 20, ordenados por churn):")
+    for hotspot in report.hotspots[:20]:
+        print(
+            f"  {hotspot.path}: {hotspot.commits} commits, "
+            f"+{hotspot.additions}/-{hotspot.deletions} linhas, churn {hotspot.churn}"
+        )
+    if not report.hotspots:
+        print("  Nenhum arquivo elegível encontrado.")
+    elif len(report.hotspots) > 20:
+        print(f"  ... {len(report.hotspots) - 20} arquivo(s) adicional(is).")
+
+    print("\nAutoria sobrevivente por módulo (. = raiz):")
+    print(f"  {blame_description(report)}")
+    if report.blame_details:
+        for module, authors in sorted(report.blame_details.modules.items()):
+            total = sum(authors.values())
+            for name, lines in sorted(authors.items(), key=lambda item: (-item[1], item[0])):
+                share = f"{lines / total:.1%}" if total else "—"
+                print(f"  {module} | {name}: {lines} linhas ({share})")
 
 
 if __name__ == "__main__":

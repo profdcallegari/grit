@@ -207,6 +207,8 @@ class GitClient:
 
         cmd = [
             "git",
+            "-c",
+            "core.quotepath=false",
             "-C",
             str(self.repo_dir),
             "log",

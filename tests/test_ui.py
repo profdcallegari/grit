@@ -4,7 +4,10 @@ import unittest
 from datetime import date, datetime
 
 from grit.activity_panel import ActivityPanel
-from grit.core.models import ActivityTimeline, AuthorStats, BranchReport, CommitSummary, RepositoryReport
+from grit.core.models import (
+    ActivityTimeline, AuthorStats, BlameDetails, BranchReport, CommitSummary, FileHotspot, RepositoryReport,
+    WeeklyActivity,
+)
 from grit.gui import GritApp
 
 
@@ -115,6 +118,44 @@ class GritAppPresentationTests(unittest.TestCase):
         self.assertFalse(self.app.commits_tree.get_children())
         self.assertFalse(self.app.branches_tree.get_children())
         self.assertEqual(len(self.app.activity_panel.canvas.find_all()), 1)
+
+    def test_rhythm_and_code_views_update_and_clear(self):
+        week = date(2026, 1, 5)
+        report = RepositoryReport(
+            1, {"Ana": AuthorStats("Ana", total_commits=1)}, [], 0, 0,
+            activity=ActivityTimeline([week], {"Ana": {week: 1}}, [WeeklyActivity(week, 1, 3, 1, 1)]),
+            hotspots=[FileHotspot("src/a.py", 1, 3, 1), FileHotspot("README.md", 2, 1, 0)],
+            blame_ref="main", blame_total_lines=3, blame_status="completed",
+            blame_details=BlameDetails({"src": {"Ana": 3}}, 2, 1, 1),
+        )
+        self.app._render_results(report)
+        values = self.app.weekly_tree.item(self.app.weekly_tree.get_children()[0], "values")
+        self.assertEqual(tuple(map(str, values[1:])), ("1", "3", "1", "1"))
+        self.assertIn("1/1", self.app.rhythm_summary.get())
+        self.assertIn("Autoria parcial", self.app.code_summary.get())
+        self.assertEqual(len(self.app.module_tree.get_children()), 1)
+        self.assertEqual(self.app.hotspot_tree.item(self.app.hotspot_tree.get_children()[0], "values")[0], "src/a.py")
+        self.app._render_hotspots("commits")
+        self.assertEqual(self.app.hotspot_tree.item(self.app.hotspot_tree.get_children()[0], "values")[0], "README.md")
+
+        self.app._render_results(RepositoryReport(0, {}, [], 0, 0))
+        self.assertFalse(self.app.weekly_tree.get_children())
+        self.assertFalse(self.app.regularity_tree.get_children())
+        self.assertFalse(self.app.hotspot_tree.get_children())
+        self.assertFalse(self.app.module_tree.get_children())
+        self.assertIn("desativado", self.app.code_summary.get())
+
+    def test_metrics_tables_are_usable_at_minimum_window_size(self):
+        self.app.geometry("850x550")
+        self.app.deiconify()
+        for first, second in (
+            (self.app.weekly_tree, self.app.regularity_tree),
+            (self.app.hotspot_tree, self.app.module_tree),
+        ):
+            self.app.notebook.select(first.master.master.master)
+            self.app.update()
+            self.assertGreaterEqual(first.winfo_height(), 55)
+            self.assertGreaterEqual(second.winfo_height(), 55)
 
 
 class ActivityColorsTests(unittest.TestCase):
