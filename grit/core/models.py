@@ -130,6 +130,7 @@ class CommitSummary:
     timestamp: datetime
     message: str
     is_merge: bool = False
+    parents: Tuple[str, ...] = ()
 
 
 @dataclass

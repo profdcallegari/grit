@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 from grit.activity_panel import ActivityPanel
 from grit.attention_panel import AttentionPanel
+from grit.constellation_panel import ConstellationPanel
 from grit.directory_panel import DirectoryPanel
 from grit.core.analyzer import RepositoryAnalyzer
 from grit.core.metrics import active_weeks, blame_description, file_history_status, history_description
@@ -45,6 +46,8 @@ class GritApp(tk.Tk):
         grit_logger.addHandler(self.log_handler)
 
     def _on_close(self):
+        if hasattr(self, "constellation_panel"):
+            self.constellation_panel.stop()
         logging.getLogger("grit").removeHandler(self.log_handler)
         self.destroy()
 
@@ -433,7 +436,15 @@ class GritApp(tk.Tk):
     def _build_commits_tab(self, parent: ttk.Frame):
         self.commits_summary = tk.StringVar(value="Execute uma análise para ver os commits.")
         ttk.Label(parent, textvariable=self.commits_summary, style="StatTitle.TLabel").pack(anchor=tk.W, pady=(0, 6))
-        body = ttk.Frame(parent)
+        views = ttk.Notebook(parent)
+        views.pack(fill=tk.BOTH, expand=True)
+        list_view = ttk.Frame(views)
+        constellation_view = ttk.Frame(views)
+        views.add(list_view, text=" Lista ")
+        views.add(constellation_view, text=" Constelação ")
+        self.commits_views = views
+
+        body = ttk.Frame(list_view)
         body.pack(fill=tk.BOTH, expand=True)
         columns = ("hash", "author", "date", "message")
         self.commits_tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
@@ -454,6 +465,21 @@ class GritApp(tk.Tk):
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.commits_tree.bind("<Double-1>", self._on_commit_double_click)
+        self.commits_tree.bind("<<TreeviewSelect>>", self._on_commit_tree_select)
+        self.constellation_panel = ConstellationPanel(
+            constellation_view, on_select=self._on_constellation_select,
+        )
+        self.constellation_panel.pack(fill=tk.BOTH, expand=True)
+
+    def _on_commit_tree_select(self, _event):
+        selection = self.commits_tree.selection()
+        if selection:
+            self.constellation_panel.select_commit(selection[0])
+
+    def _on_constellation_select(self, commit_hash: str):
+        if self.commits_tree.exists(commit_hash):
+            self.commits_tree.selection_set(commit_hash)
+            self.commits_tree.focus(commit_hash)
 
     @staticmethod
     def _configure_rows(tree: ttk.Treeview):
@@ -683,6 +709,7 @@ class GritApp(tk.Tk):
                 ),
                 tags=("stripe",) if index % 2 else (),
             )
+        self.constellation_panel.show(report.commits)
 
     def _render_rhythm(self, report: RepositoryReport, sorted_authors):
         self.weekly_tree.delete(*self.weekly_tree.get_children())

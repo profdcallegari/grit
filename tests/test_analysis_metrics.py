@@ -66,6 +66,12 @@ class AnalysisMetricsTests(unittest.TestCase):
         self.assertEqual(report.blame_details.eligible_files, 3)
         self.assertEqual(report.blame_details.analyzed_files, 3)
 
+    def test_commit_summaries_preserve_parent_links(self):
+        report = RepositoryAnalyzer(str(self.repo), include_blame=False).analyze()
+        commits = {commit.message: commit for commit in report.commits}
+        self.assertEqual(len(commits["first"].parents), 0)
+        self.assertEqual(commits["second"].parents, (commits["first"].hash,))
+
     def test_disabled_and_partial_blame_are_distinguished(self):
         disabled = RepositoryAnalyzer(str(self.repo), include_blame=False).analyze()
         self.assertIsNone(disabled.blame_details)

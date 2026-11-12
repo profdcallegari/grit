@@ -138,6 +138,49 @@ class GritAppPresentationTests(unittest.TestCase):
         self.assertFalse(self.app.branches_tree.get_children())
         self.assertEqual(len(self.app.activity_panel.canvas.find_all()), 1)
 
+    def test_constellation_and_commit_list_stay_in_sync(self):
+        first = CommitSummary(
+            "a" * 40, "Ana", datetime(2026, 1, 5), "first commit",
+        )
+        main_commit = CommitSummary(
+            "b" * 40, "Ana", datetime(2026, 1, 6), "main change",
+            parents=(first.hash,),
+        )
+        feature_commit = CommitSummary(
+            "c" * 40, "Bia", datetime(2026, 1, 6), "feature change",
+            parents=(first.hash,),
+        )
+        merge = CommitSummary(
+            "d" * 40, "Ana", datetime(2026, 1, 7), "merge feature",
+            is_merge=True, parents=(main_commit.hash, feature_commit.hash),
+        )
+        report = RepositoryReport(
+            4, {}, [], 0, 0, commits=[merge, feature_commit, main_commit, first],
+        )
+        self.app._render_results(report)
+
+        panel = self.app.constellation_panel
+        self.assertEqual(self.app.commits_views.tab(1, "text").strip(), "Constelação")
+        self.assertEqual(len(self.app.commits_tree.get_children()), 4)
+        self.assertEqual(len(panel.canvas.find_withtag("commit-star")), 4)
+        self.assertEqual(len(panel.canvas.find_withtag("parent-edge")), 4)
+        self.assertEqual(len(panel.canvas.coords(panel._star_items[merge.hash])), 8)
+        self.assertEqual(panel.canvas.itemcget(panel._star_items[merge.hash], "fill"), panel.STAR_DIM)
+
+        self.app.commits_tree.selection_set(merge.hash)
+        self.app.update()
+        self.assertIn("merge feature", panel.details_var.get())
+        self.assertNotEqual(panel.canvas.itemcget(panel._star_items[merge.hash], "fill"), panel.STAR_DIM)
+
+        panel._select_hash(first.hash, notify=True)
+        self.app.update()
+        self.assertEqual(self.app.commits_tree.selection(), (first.hash,))
+        self.assertIn("first commit", panel.details_var.get())
+
+        self.app._render_results(RepositoryReport(0, {}, [], 0, 0))
+        self.assertEqual(len(panel.canvas.find_all()), 1)
+        self.assertFalse(self.app.commits_tree.get_children())
+
     def test_rhythm_and_code_views_update_and_clear(self):
         week = date(2026, 1, 5)
         report = RepositoryReport(

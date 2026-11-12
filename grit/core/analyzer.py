@@ -273,6 +273,7 @@ class RepositoryAnalyzer:
                         timestamp=commit.timestamp,
                         message=redact_sensitive(commit.message) if attention else commit.message,
                         is_merge=commit.is_merge,
+                        parents=commit.parents,
                     )
                 )
                 author.emails.add(email)

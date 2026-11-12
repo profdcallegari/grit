@@ -109,7 +109,7 @@ O `.mailmap` do repositório também é respeitado. Quando existe roster ou `.ma
 5. **Concentração do trabalho:**
    - Percentual de commits e de linhas (adicionadas + removidas) por aluno e **índice de Gini** (0 = distribuição igual, 1 = tudo com uma pessoa). O log alerta quando uma pessoa concentra 60% ou mais dos commits.
    - **Autoria sobrevivente:** com `git blame` na branch padrão, conta quantas linhas do código atual pertencem a cada aluno (ignora lockfiles, dependências e binários; limite de 1500 arquivos). Pode ser desativada na GUI ou com `--no-blame`; é mais lenta em clones sem blobs.
-6. **Linha do tempo:** aba **Atividade** com mapa de calor de commits por semana (iniciada na segunda-feira) e por aluno.
+6. **Linha do tempo:** aba **Atividade** com mapa de calor de commits por semana (iniciada na segunda-feira) e por aluno. A aba **Commits** oferece as subabas **Lista** e **Constelação**; esta última posiciona commits cronologicamente, colore-os por autor e conecta os commits aos pais conhecidos, com seleção e reprodução do histórico.
 7. **Identidades não confiáveis:** destaca e-mails ausentes do roster/`.mailmap` ou genéricos (`root@`, `@localhost`, `(none)`), que de outra forma apareceriam como "alunos fantasma".
 8. **Links para o navegador:** na GUI, duplo clique em autor, branch ou commit (aba **Commits**) abre o item no GitHub ou GitLab (inclusive instâncias cujo host contenha `github`/`gitlab`). Requer que o remoto `origin` seja um desses; caso contrário, o motivo aparece no log.
 9. **Ritmo e regularidade:** a aba **Ritmo** mostra, por semana iniciada na segunda-feira, commits, linhas adicionadas/removidas e autores ativos. A regularidade da equipe e de cada autor é o número de semanas com commits dividido pelo total de semanas entre o primeiro e o último commit, inclusive; semanas sem atividade também são exibidas.
@@ -177,6 +177,7 @@ grit/
     ├── gui.py               # Interface gráfica (Tkinter/ttk)
     ├── activity_panel.py    # Mapa de calor de atividade semanal (Canvas)
     ├── attention_panel.py   # Pontos de atenção e filtros
+    ├── constellation_panel.py # Constelação cronológica de commits (Canvas)
     ├── directory_panel.py   # Mapa de participação por diretório (Canvas)
     ├── log_panel.py         # Aba de log (handler thread-safe + painel)
     ├── ui_theme.py          # Paleta compartilhada da interface
